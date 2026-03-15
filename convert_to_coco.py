@@ -8,6 +8,7 @@ from tqdm import tqdm
 
 def create_coco_format(image_dir, mask_dir, output_img_dir, output_json_path):
     os.makedirs(output_img_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
     
     coco_dict = {
         "images": [],
@@ -100,8 +101,8 @@ def create_coco_format(image_dir, mask_dir, output_img_dir, output_json_path):
     print(f"Saved COCO json to {output_json_path}")
 
 # 假设你的原始数据在当前目录的 data 文件夹下
-base_dir = "/geogfs1/home/u3661471/data/ai4b"
-out_base_dir = "/geogfs1/home/u3661471/data/ai4b_coco"
+base_dir = os.path.expanduser("~/data/ai4b")
+out_base_dir = os.path.expanduser("~/data/ai4b_coco")
 
 for split in ['train', 'val', 'test']:
     print(f"Converting {split} set...")

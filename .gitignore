@@ -105,6 +105,10 @@ venv.bak/
 .mypy_cache/
 data/
 data
+pretrain/
+pretrain
+logs/
+logs
 .vscode
 .idea
 .DS_Store
@@ -121,3 +125,6 @@ work_dirs/
 *.pth
 *.py~
 *.sh~
+
+# slurm logs
+slurm-*.out
