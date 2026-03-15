@@ -30,7 +30,7 @@ model = dict(
 # 如果你的输入是 512x512，单卡 batch_size 甚至可以开到 32 或 64。
 # 这里以 batch_size=16 为例。同时增加 num_workers 防止 CPU 读图成为瓶颈。
 train_dataloader = dict(
-    batch_size=12,       # 从 2 提升到 16
+    batch_size=16,       # 从 2 提升到 16
     num_workers=8,       # 从 4 提升到 8 (如果 CPU 核心多，可以设为 16)
     dataset=dict(
         data_root=data_root,
@@ -71,14 +71,14 @@ test_evaluator = dict(
 
 # ================= 5. 优化器与训练策略调整 (核心修改区) =================
 optim_wrapper = dict(
-    type='OptimWrapper',
+    type='AmpOptimWrapper', # 从 OptimWrapper 改为 AmpOptimWrapper
+    dtype='bfloat16',       
     optimizer=dict(
         type='AdamW',
-        lr=0.00005,
+        lr=0.0001,          # batch_size 变成了 16，匹配官方默认的 0.0001
         weight_decay=0.05,
         eps=1e-8,
         betas=(0.9, 0.999)))
-
 
 default_hooks = dict(
     checkpoint=dict(
