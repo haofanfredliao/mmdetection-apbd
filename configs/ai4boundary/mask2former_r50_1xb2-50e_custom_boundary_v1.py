@@ -17,7 +17,14 @@ model = dict(
     panoptic_head=dict(
         num_things_classes=num_things_classes,
         num_stuff_classes=num_stuff_classes,
-        loss_cls=dict(class_weight=[1.0] * num_classes + [0.1])),
+        loss_cls=dict(class_weight=[1.0] * num_classes + [0.1]),
+        # 覆写默认的 DiceLoss，使用自定义边界损失
+        loss_dice=dict(
+            type='BoundaryDiceLoss', 
+            loss_weight=5.0,        # 保持与 mask2former 默认的 dice loss 权重一致
+            kernel_size=3,
+            eps=1e-5)
+    ),
     panoptic_fusion_head=dict(
         num_things_classes=num_things_classes,
         num_stuff_classes=num_stuff_classes),
@@ -57,25 +64,35 @@ test_dataloader = dict(
         data_prefix=dict(img='images/test/')))
 
 # ================= 4. 评估器配置 =================
-val_evaluator = dict(
-    type='CocoMetric',
-    ann_file=data_root + 'annotations/instances_val.json',
-    metric=['bbox', 'segm'],
-    format_only=False)
+# 将原来的单一评估器改为列表，同时评估标准的 COCO 指标和自定义农田指标
+val_evaluator = [
+    dict(
+        type='CocoMetric',
+        ann_file=data_root + 'annotations/instances_val.json',
+        metric=['bbox', 'segm'],
+        format_only=False),
+    dict(
+        type='FieldSegmentationMetric',
+        iou_thr=0.5)
+]
 
-test_evaluator = dict(
-    type='CocoMetric',
-    ann_file=data_root + 'annotations/instances_test.json',
-    metric=['bbox', 'segm'],
-    format_only=False)
+test_evaluator = [
+    dict(
+        type='CocoMetric',
+        ann_file=data_root + 'annotations/instances_test.json',
+        metric=['bbox', 'segm'],
+        format_only=False),
+    dict(
+        type='FieldSegmentationMetric',
+        iou_thr=0.5)
+]
 
 # ================= 5. 优化器与训练策略调整 (核心修改区) =================
 optim_wrapper = dict(
-    type='AmpOptimWrapper', # 从 OptimWrapper 改为 AmpOptimWrapper
-    dtype='bfloat16',       
+    type='OptimWrapper',
     optimizer=dict(
         type='AdamW',
-        lr=0.0001,          # batch_size 变成了 16，匹配官方默认的 0.0001
+        lr=0.00005,
         weight_decay=0.05,
         eps=1e-8,
         betas=(0.9, 0.999)))
