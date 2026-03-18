@@ -8,7 +8,7 @@ from mmdet.models.losses.utils import weight_reduce_loss
 class BoundaryDiceLoss(nn.Module):
     """Boundary-aware Dice Loss for instance segmentation."""
     
-    def __init__(self, loss_weight=1.0, kernel_size=3, eps=1e-5):
+    def __init__(self, loss_weight=1.0, kernel_size=3, eps=1e-5, **kwargs):
         super(BoundaryDiceLoss, self).__init__()
         self.loss_weight = loss_weight
         self.kernel_size = kernel_size
@@ -30,9 +30,18 @@ class BoundaryDiceLoss(nn.Module):
 
     def forward(self, pred, target, weight=None, avg_factor=None, reduction_override=None):
         """
-        pred: [N, H, W] 模型的预测 logits
-        target: [N, H, W] 真实的二值 mask
+        pred: [N, H, W] or [N, num_points] 模型的预测 logits
+        target: [N, H, W] or [N, num_points] 真实的二值 mask
         """
+        # Mask2Former uses point-based dice loss with shape [N, num_points]
+        if pred.dim() == 2:
+            pred_prob = pred.sigmoid()
+            intersection = torch.sum(pred_prob * target, dim=1)
+            union = torch.sum(pred_prob, dim=1) + torch.sum(target, dim=1)
+            dice_loss = 1 - (2.0 * intersection + self.eps) / (union + self.eps)
+            loss = self.loss_weight * dice_loss.mean()
+            return loss
+
         # 统一维度到 [N, 1, H, W]
         pred = pred.unsqueeze(1)
         target = target.unsqueeze(1).float()

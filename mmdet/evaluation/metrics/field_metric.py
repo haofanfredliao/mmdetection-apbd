@@ -15,8 +15,17 @@ class FieldSegmentationMetric(BaseMetric):
     def process(self, data_batch: dict, data_samples: Sequence[dict]) -> None:
         """处理每个 batch 的预测结果和真实标签"""
         for data_sample in data_samples:
-            pred_masks = data_sample['pred_instances']['masks'].cpu().numpy()
-            gt_masks = data_sample['gt_instances']['masks'].cpu().numpy()
+            pred_masks = data_sample['pred_instances']['masks']
+            if hasattr(pred_masks, 'cpu'):
+                pred_masks = pred_masks.cpu().numpy()
+            elif hasattr(pred_masks, 'to_ndarray'):
+                pred_masks = pred_masks.to_ndarray()
+                
+            gt_masks = data_sample['gt_instances']['masks']
+            if hasattr(gt_masks, 'cpu'):
+                gt_masks = gt_masks.cpu().numpy()
+            elif hasattr(gt_masks, 'to_ndarray'):
+                gt_masks = gt_masks.to_ndarray()
             
             # 记录单张图像的统计信息
             self.results.append({
