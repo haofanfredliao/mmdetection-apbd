@@ -17,6 +17,7 @@ from .dsdl import DSDLDetDataset
 from .flickr30k import Flickr30kDataset
 from .isaid import iSAIDDataset
 from .lvis import LVISDataset, LVISV1Dataset, LVISV05Dataset
+from .quality_coco import QualityAwareCocoDataset
 from .mdetr_style_refcoco import MDETRStyleRefCocoDataset
 from .mot_challenge_dataset import MOTChallengeDataset
 from .objects365 import Objects365V1Dataset, Objects365V2Dataset
@@ -49,5 +50,5 @@ __all__ = [
     'BaseSegDataset', 'ADE20KSegDataset', 'CocoSegDataset',
     'ADE20KInstanceDataset', 'iSAIDDataset', 'V3DetDataset', 'ConcatDataset',
     'ODVGDataset', 'MDETRStyleRefCocoDataset', 'DODDataset',
-    'CustomSampleSizeSampler', 'Flickr30kDataset'
+    'CustomSampleSizeSampler', 'Flickr30kDataset', 'QualityAwareCocoDataset'
 ]

@@ -31,6 +31,7 @@ from .guided_anchor_head import FeatureAdaption, GuidedAnchorHead
 from .lad_head import LADHead
 from .ld_head import LDHead
 from .mask2former_head import Mask2FormerHead
+from .mask2former_head_v2 import Mask2FormerHeadV2
 from .maskformer_head import MaskFormerHead
 from .nasfcos_head import NASFCOSHead
 from .paa_head import PAAHead
@@ -64,7 +65,7 @@ __all__ = [
     'EmbeddingRPNHead', 'LDHead', 'AutoAssignHead', 'DETRHead', 'YOLOFHead',
     'DeformableDETRHead', 'CenterNetHead', 'YOLOXHead', 'SOLOHead',
     'DecoupledSOLOHead', 'DecoupledSOLOLightHead', 'SOLOV2Head', 'LADHead',
-    'TOODHead', 'MaskFormerHead', 'Mask2FormerHead', 'DDODHead',
+    'TOODHead', 'MaskFormerHead', 'Mask2FormerHead', 'Mask2FormerHeadV2', 'DDODHead',
     'CenterNetUpdateHead', 'RTMDetHead', 'RTMDetSepBNHead', 'CondInstBboxHead',
     'CondInstMaskHead', 'RTMDetInsHead', 'RTMDetInsSepBNHead',
     'BoxInstBboxHead', 'BoxInstMaskHead', 'ConditionalDETRHead', 'DINOHead',

@@ -32,6 +32,8 @@ class BoundaryDiceLoss(nn.Module):
         """
         pred: [N, H, W] or [N, num_points] 模型的预测 logits
         target: [N, H, W] or [N, num_points] 真实的二值 mask
+        weight: [N] per-sample loss weights (optional)
+        avg_factor: normalization factor (optional)
         """
         # Mask2Former uses point-based dice loss with shape [N, num_points]
         if pred.dim() == 2:
@@ -39,7 +41,7 @@ class BoundaryDiceLoss(nn.Module):
             intersection = torch.sum(pred_prob * target, dim=1)
             union = torch.sum(pred_prob, dim=1) + torch.sum(target, dim=1)
             dice_loss = 1 - (2.0 * intersection + self.eps) / (union + self.eps)
-            loss = self.loss_weight * dice_loss.mean()
+            loss = self.loss_weight * weight_reduce_loss(dice_loss, weight, 'mean', avg_factor)
             return loss
 
         # 统一维度到 [N, 1, H, W]
@@ -59,9 +61,9 @@ class BoundaryDiceLoss(nn.Module):
         # 计算边界区域的 Dice Loss
         intersection = torch.sum(pred_boundary * target_boundary, dim=(2, 3))
         union = torch.sum(pred_boundary, dim=(2, 3)) + torch.sum(target_boundary, dim=(2, 3))
-        
-        boundary_dice_loss = 1 - (2.0 * intersection + self.eps) / (union + self.eps)
-        
-        # 降维和权重应用
-        loss = self.loss_weight * boundary_dice_loss.mean()
+
+        # shape: (N, 1) -> (N,)
+        boundary_dice_loss = (1 - (2.0 * intersection + self.eps) / (union + self.eps)).squeeze(1)
+
+        loss = self.loss_weight * weight_reduce_loss(boundary_dice_loss, weight, 'mean', avg_factor)
         return loss
