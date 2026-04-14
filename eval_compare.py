@@ -27,17 +27,16 @@ PROJECT_DIR = Path(__file__).parent.resolve()
 
 MODELS = [
     {
-        'name': 'mask2former_standard',
-        'label': 'Mask2Former (Standard Dice Loss)',
-        'config': 'configs/ai4boundary/mask2former_r50_1xb2-50e_custom.py',
-        'checkpoint': 'work_dirs/mask2former_r50_1xb2-50e_custom/best_coco_segm_mAP_iter_16219.pth',
-        'inject_field_metric': True,  # 原始配置缺少 FieldSegmentationMetric，自动注入
-    },
-    {
         'name': 'mask2former_boundary_v1',
         'label': 'Mask2Former (Boundary Dice Loss v1)',
         'config': 'configs/ai4boundary/mask2former_r50_1xb2-50e_custom_boundary_v1.py',
         'checkpoint': 'work_dirs/mask2former_r50_1xb2-50e_custom_boundary_v1/best_coco_segm_mAP_iter_21312.pth',
+    },
+    {
+        'name': 'mask2former_boundary_v2',
+        'label': 'Mask2Former (Boundary Aux Loss v2)',
+        'config': 'configs/ai4boundary/mask2former_r50_1xb2-50e_custom_boundary_v2.py',
+        'checkpoint': 'work_dirs/mask2former_r50_1xb2-50e_custom_boundary_v2/best_coco_segm_mAP_iter_19600.pth',
     },
 ]
 

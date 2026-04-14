@@ -15,4 +15,4 @@ conda activate mmdet-py38
 
 cd $HOME/code/mmdetection-apbd
 
-python scripts/infer_eval_compare.py
+python eval_compare.py --device cuda:0
