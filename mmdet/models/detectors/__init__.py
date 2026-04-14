@@ -31,6 +31,7 @@ from .kd_one_stage import KnowledgeDistillationSingleStageDetector
 from .lad import LAD
 from .mask2former import Mask2Former
 from .mask_rcnn import MaskRCNN
+from .polyformer import PolyFormer
 from .mask_scoring_rcnn import MaskScoringRCNN
 from .maskformer import MaskFormer
 from .nasfcos import NASFCOS
@@ -71,5 +72,5 @@ __all__ = [
     'MaskFormer', 'DDOD', 'Mask2Former', 'SemiBaseDetector', 'SoftTeacher',
     'RTMDet', 'Detectron2Wrapper', 'CrowdDet', 'CondInst', 'BoxInst',
     'DetectionTransformer', 'ConditionalDETR', 'DINO', 'DABDETR', 'GLIP',
-    'DDQDETR', 'GroundingDINO'
+    'DDQDETR', 'GroundingDINO', 'PolyFormer'
 ]

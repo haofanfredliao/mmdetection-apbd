@@ -32,6 +32,7 @@ from .lad_head import LADHead
 from .ld_head import LDHead
 from .mask2former_head import Mask2FormerHead
 from .mask2former_head_v2 import Mask2FormerHeadV2
+from .polyformer_ins_head import PolyFormerInsHead
 from .maskformer_head import MaskFormerHead
 from .nasfcos_head import NASFCOSHead
 from .paa_head import PAAHead
@@ -69,5 +70,6 @@ __all__ = [
     'CenterNetUpdateHead', 'RTMDetHead', 'RTMDetSepBNHead', 'CondInstBboxHead',
     'CondInstMaskHead', 'RTMDetInsHead', 'RTMDetInsSepBNHead',
     'BoxInstBboxHead', 'BoxInstMaskHead', 'ConditionalDETRHead', 'DINOHead',
-    'ATSSVLFusionHead', 'DABDETRHead', 'DDQDETRHead', 'GroundingDINOHead'
+    'ATSSVLFusionHead', 'DABDETRHead', 'DDQDETRHead', 'GroundingDINOHead',
+    'PolyFormerInsHead'
 ]
