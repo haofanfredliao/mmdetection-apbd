@@ -59,6 +59,14 @@ PRIORITY_METRICS = [
     'coco/bbox_mAP_75',
     'Over-segmentation_Rate',
     'Under-segmentation_Rate',
+    'Pred_GT_Count_Ratio',
+    'Duplicate_Rate',
+    'Boundary-IoU',
+    'Boundary-F_1px',
+    'Boundary-F_3px',
+    'Boundary-F_5px',
+    'Vertices_IoU95_pred',
+    'Curvature_Energy_pred',
 ]
 
 
