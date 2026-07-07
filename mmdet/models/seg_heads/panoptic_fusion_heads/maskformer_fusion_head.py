@@ -264,3 +264,134 @@ class MaskFormerFusionHead(BasePanopticFusionHead):
             results.append(result)
 
         return results
+
+
+@MODELS.register_module()
+class FieldMaskFormerFusionHead(MaskFormerFusionHead):
+    """MaskFormer fusion head with field-specific instance post-processing.
+
+    The agricultural parcel task has a strong non-overlap prior.  This head
+    keeps training untouched and exposes cheap inference-time controls for E1:
+    score filtering, mask-level NMS, and optional argmax assignment.
+    """
+
+    def instance_postprocess(self, mask_cls: Tensor,
+                             mask_pred: Tensor) -> InstanceData:
+        if self.test_cfg.get('argmax_instance', False):
+            return self._argmax_instance_postprocess(mask_cls, mask_pred)
+
+        results = super().instance_postprocess(mask_cls, mask_pred)
+        results = self._filter_by_score(results)
+        results = self._mask_nms(results)
+        return results
+
+    def _argmax_instance_postprocess(self, mask_cls: Tensor,
+                                     mask_pred: Tensor) -> InstanceData:
+        max_per_image = self.test_cfg.get('max_per_image', 100)
+        score_thr = self.test_cfg.get('score_thr', 0.0)
+        filter_low_score = self.test_cfg.get('filter_low_score', False)
+        iou_thr = self.test_cfg.get('iou_thr', 0.8)
+
+        num_queries = mask_cls.shape[0]
+        scores = F.softmax(mask_cls, dim=-1)[:, :-1]
+        labels = torch.arange(self.num_classes, device=mask_cls.device).\
+            unsqueeze(0).repeat(num_queries, 1).flatten(0, 1)
+        scores_per_image, top_indices = scores.flatten(0, 1).topk(
+            max_per_image, sorted=True)
+        labels_per_image = labels[top_indices]
+        query_indices = top_indices // self.num_classes
+
+        is_thing = labels_per_image < self.num_things_classes
+        scores_per_image = scores_per_image[is_thing]
+        labels_per_image = labels_per_image[is_thing]
+        mask_pred = mask_pred[query_indices][is_thing]
+
+        keep = scores_per_image > score_thr
+        scores_per_image = scores_per_image[keep]
+        labels_per_image = labels_per_image[keep]
+        mask_pred = mask_pred[keep]
+
+        results = InstanceData()
+        if mask_pred.shape[0] == 0:
+            results.bboxes = mask_pred.new_zeros((0, 4))
+            results.labels = labels_per_image
+            results.scores = scores_per_image
+            results.masks = mask_pred.new_zeros(
+                (0, *mask_pred.shape[-2:]), dtype=torch.bool)
+            return results
+
+        mask_prob = mask_pred.sigmoid()
+        prob_masks = scores_per_image.view(-1, 1, 1) * mask_prob
+        assigned_ids = prob_masks.argmax(0)
+
+        kept_masks = []
+        kept_scores = []
+        kept_labels = []
+        for idx in range(mask_prob.shape[0]):
+            mask = assigned_ids == idx
+            original_mask = mask_prob[idx] >= 0.5
+            original_area = original_mask.sum()
+            if filter_low_score:
+                mask = mask & original_mask
+            mask_area = mask.sum()
+            if mask_area == 0 or original_area == 0:
+                continue
+            if mask_area.float() / (original_area.float() + 1e-5) < iou_thr:
+                continue
+
+            mask_score = mask_prob[idx][mask].mean()
+            kept_masks.append(mask)
+            kept_scores.append(scores_per_image[idx] * mask_score)
+            kept_labels.append(labels_per_image[idx])
+
+        if not kept_masks:
+            results.bboxes = mask_pred.new_zeros((0, 4))
+            results.labels = labels_per_image.new_zeros((0, ))
+            results.scores = scores_per_image.new_zeros((0, ))
+            results.masks = mask_pred.new_zeros(
+                (0, *mask_pred.shape[-2:]), dtype=torch.bool)
+            return results
+
+        masks = torch.stack(kept_masks, dim=0)
+        scores = torch.stack(kept_scores, dim=0)
+        labels = torch.stack(kept_labels, dim=0)
+        order = torch.argsort(scores, descending=True)
+
+        results.bboxes = mask2bbox(masks)[order]
+        results.labels = labels[order]
+        results.scores = scores[order]
+        results.masks = masks[order]
+        return results
+
+    def _filter_by_score(self, results: InstanceData) -> InstanceData:
+        score_thr = self.test_cfg.get('score_thr', 0.0)
+        if score_thr <= 0 or len(results.scores) == 0:
+            return results
+        keep = results.scores > score_thr
+        return results[keep]
+
+    def _mask_nms(self, results: InstanceData) -> InstanceData:
+        mask_nms_iou_thr = self.test_cfg.get('mask_nms_iou_thr', None)
+        if mask_nms_iou_thr is None or len(results.scores) <= 1:
+            return results
+
+        order = torch.argsort(results.scores, descending=True)
+        masks = results.masks[order].flatten(1).bool()
+        areas = masks.sum(dim=1).float()
+        keep = []
+        suppressed = torch.zeros(
+            len(order), dtype=torch.bool, device=masks.device)
+
+        for i in range(len(order)):
+            if suppressed[i]:
+                continue
+            keep.append(i)
+            if i == len(order) - 1:
+                continue
+            inter = (masks[i] & masks[i + 1:]).sum(dim=1).float()
+            union = areas[i] + areas[i + 1:] - inter
+            ious = inter / (union + 1e-5)
+            suppressed[i + 1:] |= ious > mask_nms_iou_thr
+
+        keep = order[torch.tensor(keep, device=order.device)]
+        return results[keep]

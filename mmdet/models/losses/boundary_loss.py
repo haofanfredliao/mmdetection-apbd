@@ -67,3 +67,81 @@ class BoundaryDiceLoss(nn.Module):
 
         loss = self.loss_weight * weight_reduce_loss(boundary_dice_loss, weight, 'mean', avg_factor)
         return loss
+
+
+@MODELS.register_module()
+class NonOverlapLoss(nn.Module):
+    """Penalize overlap among matched positive instance masks.
+
+    Args:
+        loss_weight (float): Loss weight.
+        mode (str): ``sum_excess`` penalizes pixels where the summed
+            probabilities of positives exceed one. ``pairwise_product``
+            penalizes pairwise probability products.
+        power (float): Exponent for ``sum_excess``.
+        eps (float): Numerical stability constant.
+    """
+
+    def __init__(self,
+                 loss_weight=1.0,
+                 mode='sum_excess',
+                 power=2.0,
+                 eps=1e-6,
+                 **kwargs):
+        super().__init__()
+        assert mode in ('sum_excess', 'pairwise_product')
+        self.loss_weight = loss_weight
+        self.mode = mode
+        self.power = power
+        self.eps = eps
+
+    def forward(self,
+                pred,
+                group_sizes,
+                group_weights=None,
+                avg_factor=None,
+                reduction_override=None):
+        """Compute non-overlap loss.
+
+        Args:
+            pred (Tensor): Matched positive mask logits, shape (N, H, W).
+            group_sizes (Sequence[int]): Number of positives for each image.
+            group_weights (Tensor, optional): Per-image scalar weights.
+            avg_factor (float, optional): Kept for config API compatibility.
+        """
+        if pred.numel() == 0:
+            return pred.sum() * self.loss_weight
+
+        probs = pred.sigmoid()
+        losses = []
+        start = 0
+        valid_group_idx = 0
+        for group_size in group_sizes:
+            end = start + int(group_size)
+            group = probs[start:end]
+            start = end
+            if group.shape[0] <= 1:
+                continue
+
+            if self.mode == 'sum_excess':
+                excess = torch.relu(group.sum(dim=0) - 1.0)
+                loss = excess.pow(self.power).mean()
+            else:
+                flat = group.flatten(1)
+                pairwise = torch.matmul(flat, flat.t())
+                areas = flat.sum(dim=1)
+                norm = areas[:, None] + areas[None, :] + self.eps
+                pairwise = pairwise / norm
+                upper = torch.triu(
+                    torch.ones_like(pairwise, dtype=torch.bool), diagonal=1)
+                loss = pairwise[upper].mean()
+
+            if group_weights is not None:
+                loss = loss * group_weights[valid_group_idx]
+            losses.append(loss)
+            valid_group_idx += 1
+
+        if not losses:
+            return pred.sum() * 0.0
+
+        return self.loss_weight * torch.stack(losses).mean()

@@ -69,6 +69,18 @@ PRIORITY_METRICS = [
     'Curvature_Energy_pred',
 ]
 
+LOWER_IS_BETTER_METRICS = {
+    'Over-segmentation_Rate',
+    'Under-segmentation_Rate',
+    'Duplicate_Rate',
+    'Vertices_IoU95_pred',
+    'Curvature_Energy_pred',
+}
+
+CLOSER_TO_ONE_METRICS = {
+    'Pred_GT_Count_Ratio',
+}
+
 
 # ===================================================================
 # 推理 & 评估
@@ -274,7 +286,13 @@ def print_comparison(all_results: dict):
     for key in sorted_keys:
         vals = [all_results[n].get(key) for n in model_names]
         numeric_vals = [v for v in vals if isinstance(v, (int, float))]
-        best = max(numeric_vals) if numeric_vals else None
+        if key in LOWER_IS_BETTER_METRICS:
+            best = min(numeric_vals) if numeric_vals else None
+        elif key in CLOSER_TO_ONE_METRICS:
+            best = min(numeric_vals, key=lambda v: abs(v - 1.0)) \
+                if numeric_vals else None
+        else:
+            best = max(numeric_vals) if numeric_vals else None
 
         row = f'{key:<{key_w}}'
         for v in vals:
@@ -287,7 +305,7 @@ def print_comparison(all_results: dict):
             row += f'{cell:>{col_w}}'
         lines.append(row)
 
-    lines += [sep, '  ◀ 表示该指标最高值', '']
+    lines += [sep, '  ◀ 表示该指标方向上的较优值', '']
 
     output = '\n'.join(lines)
     print(output)
