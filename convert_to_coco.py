@@ -5,6 +5,7 @@ import numpy as np
 import tifffile
 import cv2
 from tqdm import tqdm
+from pathlib import Path
 
 def create_coco_format(image_dir, mask_dir, output_img_dir, output_json_path):
     os.makedirs(output_img_dir, exist_ok=True)
@@ -19,7 +20,7 @@ def create_coco_format(image_dir, mask_dir, output_img_dir, output_json_path):
     annotation_id = 1
     
     # 获取所有图像文件
-    image_paths = glob.glob(os.path.join(image_dir, '*.tif'))
+    image_paths = sorted(glob.glob(os.path.join(image_dir, '*.tif')))
     
     for img_id, img_path in enumerate(tqdm(image_paths, desc=f"Processing {os.path.basename(image_dir)}")):
         filename = os.path.basename(img_path)
@@ -55,9 +56,9 @@ def create_coco_format(image_dir, mask_dir, output_img_dir, output_json_path):
         # 提取第4个通道 (索引为3)
         instance_mask = mask_data[:, :, 3]
         
-        # 获取所有唯一的实例 ID，排除背景 -10000
+        # 获取所有唯一的实例 ID，排除背景/无效值
         instance_ids = np.unique(instance_mask)
-        instance_ids = instance_ids[instance_ids != -10000]
+        instance_ids = instance_ids[(instance_ids != -10000) & (instance_ids != 0)]
         
         for inst_id in instance_ids:
             # 创建当前实例的二值掩码
@@ -83,7 +84,7 @@ def create_coco_format(image_dir, mask_dir, output_img_dir, output_json_path):
             ymin = np.min(pos[0])
             ymax = np.max(pos[0])
             bbox = [int(xmin), int(ymin), int(xmax - xmin), int(ymax - ymin)]
-            area = int((xmax - xmin) * (ymax - ymin)) # 简化面积计算，或使用 cv2.contourArea
+            area = int(binary_mask.sum())
             
             coco_dict["annotations"].append({
                 "id": annotation_id,
@@ -100,9 +101,12 @@ def create_coco_format(image_dir, mask_dir, output_img_dir, output_json_path):
         json.dump(coco_dict, f)
     print(f"Saved COCO json to {output_json_path}")
 
-# 假设你的原始数据在当前目录的 data 文件夹下
-base_dir = os.path.expanduser("~/data/ai4b")
-out_base_dir = os.path.expanduser("~/data/ai4b_coco")
+# 默认读取仓库下的 data/ai4b，并输出到训练配置使用的 data/data/ai4b_coco。
+# 可通过环境变量覆盖，便于在不同服务器上复用。
+repo_dir = Path(__file__).resolve().parent
+base_dir = os.environ.get("AI4B_BASE_DIR", str(repo_dir / "data" / "ai4b"))
+out_base_dir = os.environ.get(
+    "AI4B_COCO_DIR", str(repo_dir / "data" / "data" / "ai4b_coco"))
 
 for split in ['train', 'val', 'test']:
     print(f"Converting {split} set...")

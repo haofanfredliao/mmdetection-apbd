@@ -147,12 +147,15 @@ class MaskFormerFusionHead(BasePanopticFusionHead):
                 - masks (Tensor): Has a shape (num_instances, H, W).
         """
         max_per_image = self.test_cfg.get('max_per_image', 100)
+        score_thr = self.test_cfg.get('score_thr', 0.0)
+        mask_nms_iou_thr = self.test_cfg.get('mask_nms_iou_thr', None)
         num_queries = mask_cls.shape[0]
         # shape (num_queries, num_class)
         scores = F.softmax(mask_cls, dim=-1)[:, :-1]
         # shape (num_queries * num_class, )
         labels = torch.arange(self.num_classes, device=mask_cls.device).\
             unsqueeze(0).repeat(num_queries, 1).flatten(0, 1)
+        max_per_image = min(max_per_image, scores.numel())
         scores_per_image, top_indices = scores.flatten(0, 1).topk(
             max_per_image, sorted=False)
         labels_per_image = labels[top_indices]
@@ -172,6 +175,20 @@ class MaskFormerFusionHead(BasePanopticFusionHead):
                                      mask_pred_binary.flatten(1).sum(1) + 1e-6)
         det_scores = scores_per_image * mask_scores_per_image
         mask_pred_binary = mask_pred_binary.bool()
+
+        if score_thr > 0:
+            keep = det_scores > score_thr
+            det_scores = det_scores[keep]
+            labels_per_image = labels_per_image[keep]
+            mask_pred_binary = mask_pred_binary[keep]
+
+        if mask_nms_iou_thr is not None and len(mask_pred_binary) > 1:
+            keep = self.mask_nms(mask_pred_binary, det_scores,
+                                 float(mask_nms_iou_thr))
+            det_scores = det_scores[keep]
+            labels_per_image = labels_per_image[keep]
+            mask_pred_binary = mask_pred_binary[keep]
+
         bboxes = mask2bbox(mask_pred_binary)
 
         results = InstanceData()
@@ -180,6 +197,29 @@ class MaskFormerFusionHead(BasePanopticFusionHead):
         results.scores = det_scores
         results.masks = mask_pred_binary
         return results
+
+    @staticmethod
+    def mask_nms(masks: Tensor, scores: Tensor, iou_thr: float) -> Tensor:
+        """Greedy NMS for binary masks, returning kept indices."""
+        order = scores.argsort(descending=True)
+        keep = []
+
+        areas = masks.flatten(1).sum(dim=1).float()
+        masks_flat = masks.flatten(1).float()
+
+        while order.numel() > 0:
+            idx = order[0]
+            keep.append(idx)
+            if order.numel() == 1:
+                break
+
+            rest = order[1:]
+            inter = (masks_flat[idx][None] * masks_flat[rest]).sum(dim=1)
+            union = areas[idx] + areas[rest] - inter
+            ious = inter / union.clamp(min=1e-6)
+            order = rest[ious <= iou_thr]
+
+        return torch.stack(keep) if keep else order.new_empty((0,))
 
     def predict(self,
                 mask_cls_results: Tensor,
