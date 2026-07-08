@@ -41,12 +41,20 @@ class Mask2FormerHeadV2(Mask2FormerHead):
             eps=1e-5)``
     """
 
-    def __init__(self, loss_boundary=None, boundary_max_res: int = 256,
+    def __init__(self,
+                 loss_boundary=None,
+                 boundary_max_res: int = 256,
+                 loss_nonoverlap=None,
+                 nonoverlap_max_res: int = 128,
                  **kwargs):
         super().__init__(**kwargs)
         self.loss_boundary = (
             MODELS.build(loss_boundary) if loss_boundary is not None else None)
         self.boundary_max_res = boundary_max_res
+        self.loss_nonoverlap = (
+            MODELS.build(loss_nonoverlap)
+            if loss_nonoverlap is not None else None)
+        self.nonoverlap_max_res = nonoverlap_max_res
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -67,13 +75,27 @@ class Mask2FormerHeadV2(Mask2FormerHead):
             return None
         return torch.cat(chunks, dim=0)
 
+    def _build_nonoverlap_group_weights(self, mask_targets_list,
+                                        batch_img_metas, reference_tensor):
+        """Build per-image weights for groups with at least two positives."""
+        chunks = []
+        for i, t in enumerate(mask_targets_list):
+            if t.shape[0] <= 1:
+                continue
+            w = float(batch_img_metas[i].get('loss_weight', 1.0))
+            chunks.append(reference_tensor.new_tensor(w))
+        if not chunks:
+            return None
+        return torch.stack(chunks, dim=0)
+
     # ------------------------------------------------------------------
     # Override _loss_by_feat_single
     # ------------------------------------------------------------------
 
     def _loss_by_feat_single(self, cls_scores: Tensor, mask_preds: Tensor,
                              batch_gt_instances, batch_img_metas,
-                             compute_boundary: bool = False):
+                             compute_boundary: bool = False,
+                             compute_nonoverlap: bool = False):
         """Loss for a single decoder layer.
 
         Adds quality weighting via img_meta['loss_weight'].
@@ -115,7 +137,12 @@ class Mask2FormerHeadV2(Mask2FormerHead):
 
         if mask_targets.shape[0] == 0:
             zero = mask_preds_pos.sum()
-            if compute_boundary and self.loss_boundary is not None:
+            has_boundary = compute_boundary and self.loss_boundary is not None
+            has_nonoverlap = (
+                compute_nonoverlap and self.loss_nonoverlap is not None)
+            if has_boundary and has_nonoverlap:
+                return loss_cls, zero, zero, zero, zero
+            if has_boundary or has_nonoverlap:
                 return loss_cls, zero, zero, zero
             return loss_cls, zero, zero
 
@@ -155,6 +182,29 @@ class Mask2FormerHeadV2(Mask2FormerHead):
             loss_boundary = None
 
         # ------------------------------------------------------------------
+        # Non-overlap loss – positive queries are grouped by image.  It is
+        # computed only on the last decoder layer and at capped resolution.
+        # ------------------------------------------------------------------
+        if compute_nonoverlap and self.loss_nonoverlap is not None:
+            group_sizes = [t.shape[0] for t in mask_targets_list]
+            ov_h = min(mask_preds_pos.shape[-2], self.nonoverlap_max_res)
+            ov_w = min(mask_preds_pos.shape[-1], self.nonoverlap_max_res)
+            if ov_h < mask_preds_pos.shape[-2] or ov_w < mask_preds_pos.shape[-1]:
+                mask_preds_overlap = F.interpolate(
+                    mask_preds_pos.unsqueeze(1), size=(ov_h, ov_w),
+                    mode='bilinear', align_corners=False).squeeze(1)
+            else:
+                mask_preds_overlap = mask_preds_pos
+
+            group_weights = self._build_nonoverlap_group_weights(
+                mask_targets_list, batch_img_metas, mask_preds_pos)
+            loss_nonoverlap = self.loss_nonoverlap(
+                mask_preds_overlap, group_sizes, group_weights=group_weights,
+                avg_factor=num_total_masks)
+        else:
+            loss_nonoverlap = None
+
+        # ------------------------------------------------------------------
         # Standard point-sampled dice + CE mask losses (quality-weighted dice)
         # ------------------------------------------------------------------
         with torch.no_grad():
@@ -179,8 +229,12 @@ class Mask2FormerHeadV2(Mask2FormerHead):
             mask_point_preds_flat, mask_point_targets_flat,
             avg_factor=num_total_masks * self.num_points)
 
+        if loss_boundary is not None and loss_nonoverlap is not None:
+            return loss_cls, loss_mask, loss_dice, loss_boundary, loss_nonoverlap
         if loss_boundary is not None:
             return loss_cls, loss_mask, loss_dice, loss_boundary
+        if loss_nonoverlap is not None:
+            return loss_cls, loss_mask, loss_dice, loss_nonoverlap
         return loss_cls, loss_mask, loss_dice
 
     # ------------------------------------------------------------------
@@ -213,19 +267,31 @@ class Mask2FormerHeadV2(Mask2FormerHead):
         last_result = self._loss_by_feat_single(
             all_cls_scores[-1], all_mask_preds[-1],
             batch_gt_instances, batch_img_metas,
-            compute_boundary=(self.loss_boundary is not None))
+            compute_boundary=(self.loss_boundary is not None),
+            compute_nonoverlap=(self.loss_nonoverlap is not None))
 
-        if self.loss_boundary is not None:
+        if self.loss_boundary is not None and self.loss_nonoverlap is not None:
+            (last_cls, last_mask, last_dice, last_boundary,
+             last_nonoverlap) = last_result
+        elif self.loss_boundary is not None:
             last_cls, last_mask, last_dice, last_boundary = last_result
+            last_nonoverlap = None
+        elif self.loss_nonoverlap is not None:
+            last_cls, last_mask, last_dice, last_nonoverlap = last_result
+            last_boundary = None
         else:
             last_cls, last_mask, last_dice = last_result
+            last_boundary = None
+            last_nonoverlap = None
 
         loss_dict = dict()
         loss_dict['loss_cls'] = last_cls
         loss_dict['loss_mask'] = last_mask
         loss_dict['loss_dice'] = last_dice
-        if self.loss_boundary is not None:
+        if last_boundary is not None:
             loss_dict['loss_boundary'] = last_boundary
+        if last_nonoverlap is not None:
+            loss_dict['loss_nonoverlap'] = last_nonoverlap
 
         for dec_i, (lc, lm, ld) in enumerate(
                 zip(aux_cls, aux_mask, aux_dice)):
