@@ -120,6 +120,7 @@ logs
 docs/modelzoo_statistics.md
 mmdet/.mim
 work_dirs/
+outputs/
 
 # Pytorch
 *.pth

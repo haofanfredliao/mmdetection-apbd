@@ -1,14 +1,9 @@
 #!/bin/bash
-#SBATCH --job-name=data_prep
-#SBATCH --partition=GEOG-HPC-GPU
-#SBATCH --qos=Normal
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8       
-#SBATCH --mem=32G               
-#SBATCH --time=02:00:00        
+# 单机 H800 直接跑数据预处理（COCO 格式转换）。
+set -euo pipefail
+cd "$(dirname "$0")/.."
 
 source ~/miniconda3/etc/profile.d/conda.sh
-conda activate mmdet-py38
-cd $HOME/code/mmdetection-apbd
-python convert_to_coco.py
+conda activate openmmlab
+
+python convert_to_coco.py "$@"

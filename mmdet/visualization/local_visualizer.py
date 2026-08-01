@@ -41,10 +41,16 @@ class DetLocalVisualizer(Visualizer):
         mask_color (str, tuple(int), optional): Color of masks.
             The tuple of color should be in BGR order.
             Defaults to None.
-        line_width (int, float): The linewidth of lines.
+        line_width (int, float): The linewidth of bbox lines.
             Defaults to 3.
+        mask_edge_width (int, float): The linewidth of the mask contour
+            (the white outline drawn around each predicted mask).
+            Defaults to 1.
         alpha (int, float): The transparency of bboxes or mask.
             Defaults to 0.8.
+        draw_bbox (bool): Whether to draw bboxes for instance results.
+            Set to False to only show masks (+ labels), no bbox rectangles.
+            Defaults to True.
 
     Examples:
         >>> import numpy as np
@@ -89,7 +95,9 @@ class DetLocalVisualizer(Visualizer):
                                             Tuple[int]]] = (200, 200, 200),
                  mask_color: Optional[Union[str, Tuple[int]]] = None,
                  line_width: Union[int, float] = 3,
-                 alpha: float = 0.8) -> None:
+                 mask_edge_width: Union[int, float] = 1,
+                 alpha: float = 0.8,
+                 draw_bbox: bool = True) -> None:
         super().__init__(
             name=name,
             image=image,
@@ -99,7 +107,9 @@ class DetLocalVisualizer(Visualizer):
         self.text_color = text_color
         self.mask_color = mask_color
         self.line_width = line_width
+        self.mask_edge_width = mask_edge_width
         self.alpha = alpha
+        self.draw_bbox = draw_bbox
         # Set default value. When calling
         # `DetLocalVisualizer().dataset_meta=xxx`,
         # it will override the default value.
@@ -123,7 +133,8 @@ class DetLocalVisualizer(Visualizer):
         """
         self.set_image(image)
 
-        if 'bboxes' in instances and instances.bboxes.sum() > 0:
+        if self.draw_bbox and 'bboxes' in instances and instances.bboxes.sum(
+        ) > 0:
             bboxes = instances.bboxes
             labels = instances.labels
 
@@ -190,14 +201,21 @@ class DetLocalVisualizer(Visualizer):
             for i, mask in enumerate(masks):
                 contours, _ = bitmap_to_polygon(mask)
                 polygons.extend(contours)
-            self.draw_polygons(polygons, edge_colors='w', alpha=self.alpha)
+            self.draw_polygons(
+                polygons,
+                edge_colors='w',
+                alpha=self.alpha,
+                line_widths=self.mask_edge_width)
             self.draw_binary_masks(masks, colors=colors, alphas=self.alpha)
 
             if len(labels) > 0 and \
-                    ('bboxes' not in instances or
+                    (not self.draw_bbox or 'bboxes' not in instances or
                      instances.bboxes.sum() == 0):
                 # instances.bboxes.sum()==0 represent dummy bboxes.
                 # A typical example of SOLO does not exist bbox branch.
+                # Also falls in here when draw_bbox=False, so labels are
+                # placed at the mask centroid instead of a hidden bbox
+                # corner.
                 areas = []
                 positions = []
                 for mask in masks:
@@ -283,7 +301,11 @@ class DetLocalVisualizer(Visualizer):
         for i, mask in enumerate(segms):
             contours, _ = bitmap_to_polygon(mask)
             polygons.extend(contours)
-        self.draw_polygons(polygons, edge_colors='w', alpha=self.alpha)
+        self.draw_polygons(
+            polygons,
+            edge_colors='w',
+            alpha=self.alpha,
+            line_widths=self.mask_edge_width)
         self.draw_binary_masks(segms, colors=colors, alphas=self.alpha)
 
         # draw label

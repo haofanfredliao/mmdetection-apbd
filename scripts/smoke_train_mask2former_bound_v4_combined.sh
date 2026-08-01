@@ -7,11 +7,12 @@ source ~/miniconda3/etc/profile.d/conda.sh
 conda activate openmmlab
 
 python tools/train.py \
-  configs/ai4boundary/mask2former_r50_1xb2-50e_custom_boundary_v3_nonoverlap.py \
-  --work-dir work_dirs/smoke_mask2former_boundary_v3_nonoverlap \
+  configs/ai4boundary/mask2former_r50_1xb2-50e_custom_boundary_v4_combined.py \
+  --work-dir work_dirs/smoke_mask2former_boundary_v4_combined \
   --cfg-options \
     train_dataloader.batch_size=2 \
     train_dataloader.num_workers=4 \
     train_cfg.max_iters=20 \
     train_cfg.val_interval=1000 \
-    default_hooks.checkpoint.interval=1000
+    default_hooks.checkpoint.interval=1000 \
+    custom_hooks.0.end_iter=10

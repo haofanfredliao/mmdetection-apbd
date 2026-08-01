@@ -1,19 +1,9 @@
 #!/bin/bash
-#SBATCH --job-name=eval_compare
-#SBATCH --partition=GEOG-HPC-GPU     
-#SBATCH --qos=Normal                 # 指定 QoS 
-#SBATCH --nodes=1                    # 使用 1 个节点
-#SBATCH --ntasks=1                   # 运行 1 个任务
-#SBATCH --cpus-per-task=8            # 为数据加载分配 8 个 CPU 核心
-#SBATCH --mem=32G                    # 申请 32GB 内存
-#SBATCH --gres=shard:1               # 申请 1 个 GPU 分片
-#SBATCH --time=12:00:00              # 最大运行时间 12小时
-#SBATCH --output=logs/eval_%j.out    # 标准输出日志保存路径
-#SBATCH --error=logs/eval_%j.err     # 错误日志保存路径
+# 单机 H800 直接跑多 checkpoint 对比评估。
+set -euo pipefail
+cd "$(dirname "$0")/.."
 
-source ~/miniconda3/etc/profile.d/conda.sh  
-conda activate mmdet-py38  
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate openmmlab
 
-cd $HOME/code/mmdetection-apbd
-
-python eval_compare.py --device cuda:0
+python eval_compare.py --device cuda:0 "$@"

@@ -168,19 +168,25 @@ optim_wrapper = dict(
         eps=1e-8,
         betas=(0.9, 0.999)))
 
-default_hooks = dict(
-    checkpoint=dict(
-        type='CheckpointHook',
-        interval=5,
-        max_keep_ckpts=3,
-        save_best='coco/segm_mAP',
-        rule='greater'))
-
 # Epoch size shrinks because 3_extreme (~9.8%) is excluded from train set.
 # Approximate train size after filtering: 5319 - 524 ≈ 4795 images.
 # With batch_size=12: ~400 iters/epoch → 50 epochs ≈ 20000 iters.
 max_iters = 20000
-val_interval_iters = 400  # ~1 epoch
+val_interval_iters = 800  # ~2 epochs
+
+# NOTE: the base mask2former_r50_8xb2-lsj-50e_coco-panoptic.py config sets
+# CheckpointHook to by_epoch=False (iteration-based). Earlier versions of
+# this file set interval=5 assuming "5 epochs", which actually saved a
+# checkpoint every 5 ITERATIONS — flooding disk I/O and slowing training.
+# Align checkpoint with eval explicitly instead.
+default_hooks = dict(
+    checkpoint=dict(
+        type='CheckpointHook',
+        by_epoch=False,
+        interval=val_interval_iters,
+        max_keep_ckpts=3,
+        save_best='coco/segm_mAP',
+        rule='greater'))
 
 train_cfg = dict(
     type='IterBasedTrainLoop',

@@ -1,19 +1,9 @@
 #!/bin/bash
-#SBATCH --job-name=eval_e1b_tune
-#SBATCH --partition=GEOG-HPC-GPU
-#SBATCH --qos=Normal
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
-#SBATCH --gres=shard:1
-#SBATCH --time=12:00:00
-#SBATCH --output=logs/eval_e1b_%j.out
-#SBATCH --error=logs/eval_e1b_%j.err
+# 单机 H800 直接跑 E1b 后处理精调评估。
+set -euo pipefail
+cd "$(dirname "$0")/.."
 
 source ~/miniconda3/etc/profile.d/conda.sh
-conda activate mmdet-py38
+conda activate openmmlab
 
-cd $HOME/code/mmdetection-apbd
-
-python eval_e1b_postprocess_tune.py --device cuda:0
+python eval_e1b_postprocess_tune.py --device cuda:0 "$@"

@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 # V2: adds boundary aux loss on full-resolution decoder outputs and
 #     per-image quality loss weighting via img_meta['loss_weight'].
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -18,34 +18,69 @@ from .mask2former_head import Mask2FormerHead
 
 @MODELS.register_module()
 class Mask2FormerHeadV2(Mask2FormerHead):
-    """Extends Mask2FormerHead with two improvements for agricultural field
-    segmentation:
+    """Extends Mask2FormerHead with several improvements for agricultural
+    field segmentation, each independently toggleable via its own loss cfg
+    so any combination can be stacked in a single training run:
 
-    1. **Boundary aux loss**: ``loss_boundary`` is computed on full-resolution
-       (upsampled) decoder mask outputs, bypassing the point-sampling path so
-       that morphological boundary extraction is spatially valid.
+    1. **Boundary aux loss** (``loss_boundary``, Track 2 / E4): computed at
+       (capped) decoder feature resolution on morphologically-extracted
+       boundary bands (:class:`BoundaryDiceLoss`).
 
-    2. **Per-image quality weighting**: if ``img_meta`` contains a
-       ``loss_weight`` key (float), each GT instance from that image is scaled
-       by that factor when computing ``loss_dice`` and ``loss_boundary``.
-       ``3_extreme`` images are excluded at the dataset level;
-       ``2_lazy`` images carry ``loss_weight=0.2``.
+    2. **Non-overlap loss** (``loss_nonoverlap``, Track 1 / E2): penalizes
+       overlap among matched positive masks of the same image
+       (:class:`NonOverlapLoss`).
 
-    Only ``loss_boundary`` and ``loss_dice`` are quality-weighted; the
+    3. **Surface / Kervadec boundary loss** (``loss_surface``, Track 2 /
+       E4b): GT signed-distance-map loss for direct boundary localization
+       (:class:`KervadecBoundaryLoss`).
+
+    4. **Curvature regularization** (``loss_curvature``, Track 3 / E5):
+       penalizes jagged boundaries while protecting sharp GT corners
+       (:class:`CurvatureLoss`).
+
+    5. **Per-image quality weighting**: if ``img_meta`` contains a
+       ``loss_weight`` key (float), each GT instance from that image is
+       scaled by that factor when computing ``loss_dice`` and all of the
+       auxiliary losses above. ``3_extreme`` images are excluded at the
+       dataset level; ``2_lazy`` images typically carry a reduced weight.
+
+    Only ``loss_dice`` and the auxiliary losses are quality-weighted; the
     cross-entropy ``loss_mask`` is left unscaled for training stability.
+
+    All auxiliary losses are computed once, on the last decoder layer only,
+    each at its own capped resolution (``*_max_res``) to bound memory/CPU
+    cost — see the per-loss docstrings in ``mmdet/models/losses/
+    boundary_loss.py`` for why (e.g. the surface loss's GT distance
+    transform runs on CPU).
 
     New config args (beyond Mask2FormerHead):
         loss_boundary (dict, optional): Config for the boundary aux loss.
-            If None the boundary loss term is omitted.  Recommended:
-            ``dict(type='BoundaryDiceLoss', loss_weight=2.0, kernel_size=3,
-            eps=1e-5)``
+            Recommended: ``dict(type='BoundaryDiceLoss', loss_weight=2.0,
+            kernel_size=3, eps=1e-5)``.
+        loss_nonoverlap (dict, optional): Config for the non-overlap loss.
+        loss_surface (dict, optional): Config for the Kervadec surface
+            loss. Recommended starting weight is small (e.g. 0.01-0.1);
+            see :class:`~mmdet.models.losses.KervadecBoundaryLoss`.
+        loss_curvature (dict, optional): Config for the curvature
+            regularization loss.
+        Any of the above left as ``None`` (the default) omits that loss
+        term entirely — no combinatorics to worry about when enabling a
+        subset.
     """
+
+    # name -> (init kwarg for the loss cfg, init kwarg for its max_res,
+    #          default max_res, loss_dict key)
+    _AUX_LOSS_NAMES = ('boundary', 'nonoverlap', 'surface', 'curvature')
 
     def __init__(self,
                  loss_boundary=None,
                  boundary_max_res: int = 256,
                  loss_nonoverlap=None,
                  nonoverlap_max_res: int = 128,
+                 loss_surface=None,
+                 surface_max_res: int = 128,
+                 loss_curvature=None,
+                 curvature_max_res: int = 128,
                  **kwargs):
         super().__init__(**kwargs)
         self.loss_boundary = (
@@ -55,10 +90,27 @@ class Mask2FormerHeadV2(Mask2FormerHead):
             MODELS.build(loss_nonoverlap)
             if loss_nonoverlap is not None else None)
         self.nonoverlap_max_res = nonoverlap_max_res
+        self.loss_surface = (
+            MODELS.build(loss_surface) if loss_surface is not None else None)
+        self.surface_max_res = surface_max_res
+        self.loss_curvature = (
+            MODELS.build(loss_curvature)
+            if loss_curvature is not None else None)
+        self.curvature_max_res = curvature_max_res
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @property
+    def active_aux_loss_names(self) -> List[str]:
+        """Names (subset of ``_AUX_LOSS_NAMES``) of the auxiliary losses
+        that were configured (i.e. not None), in a fixed, deterministic
+        order."""
+        return [
+            name for name in self._AUX_LOSS_NAMES
+            if getattr(self, f'loss_{name}') is not None
+        ]
 
     def _build_per_gt_quality_weights(self, mask_targets_list, batch_img_metas,
                                        reference_tensor):
@@ -88,22 +140,99 @@ class Mask2FormerHeadV2(Mask2FormerHead):
             return None
         return torch.stack(chunks, dim=0)
 
+    @staticmethod
+    def _resize_pred(mask_preds_pos: Tensor, max_res: int) -> Tensor:
+        """Downsample predicted mask logits to at most ``max_res`` per
+        side (bilinear), leaving them untouched if already smaller."""
+        h_feat, w_feat = mask_preds_pos.shape[-2:]
+        out_h, out_w = min(h_feat, max_res), min(w_feat, max_res)
+        if out_h < h_feat or out_w < w_feat:
+            return F.interpolate(
+                mask_preds_pos.unsqueeze(1), size=(out_h, out_w),
+                mode='bilinear', align_corners=False).squeeze(1)
+        return mask_preds_pos
+
+    @staticmethod
+    def _resize_target(mask_targets: Tensor, out_hw: Tuple[int, int]
+                       ) -> Tensor:
+        """Downsample a binary GT mask to ``out_hw`` (nearest, no grad)."""
+        with torch.no_grad():
+            return F.interpolate(
+                mask_targets.unsqueeze(1).float(), size=out_hw,
+                mode='nearest').squeeze(1)
+
+    def _resize_pred_target(self, mask_preds_pos: Tensor,
+                            mask_targets: Tensor, max_res: int
+                            ) -> Tuple[Tensor, Tensor]:
+        pred = self._resize_pred(mask_preds_pos, max_res)
+        target = self._resize_target(mask_targets, pred.shape[-2:])
+        return pred, target
+
+    def _compute_aux_losses(self, aux_loss_names: List[str],
+                            mask_preds_pos: Tensor, mask_targets: Tensor,
+                            mask_targets_list, batch_img_metas,
+                            per_gt_w, num_total_masks) -> Dict[str, Tensor]:
+        """Compute every requested auxiliary loss and return a
+        ``{name: loss_tensor}`` dict. Only called for the last decoder
+        layer, and only for losses that were actually configured."""
+        aux_losses: Dict[str, Tensor] = {}
+
+        if 'boundary' in aux_loss_names:
+            pred_bdr, target_bdr = self._resize_pred_target(
+                mask_preds_pos, mask_targets, self.boundary_max_res)
+            aux_losses['boundary'] = self.loss_boundary(
+                pred_bdr, target_bdr, weight=per_gt_w,
+                avg_factor=num_total_masks)
+
+        if 'nonoverlap' in aux_loss_names:
+            mask_preds_ov = self._resize_pred(
+                mask_preds_pos, self.nonoverlap_max_res)
+            group_sizes = [t.shape[0] for t in mask_targets_list]
+            group_weights = self._build_nonoverlap_group_weights(
+                mask_targets_list, batch_img_metas, mask_preds_pos)
+            aux_losses['nonoverlap'] = self.loss_nonoverlap(
+                mask_preds_ov, group_sizes, group_weights=group_weights,
+                avg_factor=num_total_masks)
+
+        if 'surface' in aux_loss_names:
+            pred_sfc, target_sfc = self._resize_pred_target(
+                mask_preds_pos, mask_targets, self.surface_max_res)
+            aux_losses['surface'] = self.loss_surface(
+                pred_sfc, target_sfc, weight=per_gt_w,
+                avg_factor=num_total_masks)
+
+        if 'curvature' in aux_loss_names:
+            pred_crv, target_crv = self._resize_pred_target(
+                mask_preds_pos, mask_targets, self.curvature_max_res)
+            aux_losses['curvature'] = self.loss_curvature(
+                pred_crv, target_crv, weight=per_gt_w,
+                avg_factor=num_total_masks)
+
+        return aux_losses
+
     # ------------------------------------------------------------------
     # Override _loss_by_feat_single
     # ------------------------------------------------------------------
 
     def _loss_by_feat_single(self, cls_scores: Tensor, mask_preds: Tensor,
                              batch_gt_instances, batch_img_metas,
-                             compute_boundary: bool = False,
-                             compute_nonoverlap: bool = False):
+                             aux_loss_names: Optional[List[str]] = None
+                             ) -> Tuple[Tensor, Tensor, Tensor, Dict[str, Tensor]]:
         """Loss for a single decoder layer.
 
         Adds quality weighting via img_meta['loss_weight'].
-        Optionally computes boundary aux loss at capped resolution
-        (only called with compute_boundary=True for the last decoder layer).
+        ``aux_loss_names`` lists which auxiliary losses to compute (only
+        passed non-empty for the last decoder layer); an empty dict is
+        returned as the 4th element otherwise.
+
+        Returns:
+            tuple: ``(loss_cls, loss_mask, loss_dice, aux_losses)`` where
+            ``aux_losses`` is a ``{name: Tensor}`` dict (possibly empty).
         """
         from mmcv.ops import point_sample
         from ..utils import get_uncertain_point_coords_with_randomness
+
+        aux_loss_names = aux_loss_names or []
 
         num_imgs = cls_scores.size(0)
         cls_scores_list = [cls_scores[i] for i in range(num_imgs)]
@@ -137,72 +266,20 @@ class Mask2FormerHeadV2(Mask2FormerHead):
 
         if mask_targets.shape[0] == 0:
             zero = mask_preds_pos.sum()
-            has_boundary = compute_boundary and self.loss_boundary is not None
-            has_nonoverlap = (
-                compute_nonoverlap and self.loss_nonoverlap is not None)
-            if has_boundary and has_nonoverlap:
-                return loss_cls, zero, zero, zero, zero
-            if has_boundary or has_nonoverlap:
-                return loss_cls, zero, zero, zero
-            return loss_cls, zero, zero
+            aux_losses = {name: zero for name in aux_loss_names}
+            return loss_cls, zero, zero, aux_losses
 
         # --- per-gt quality weights ---
         per_gt_w = self._build_per_gt_quality_weights(
             mask_targets_list, batch_img_metas, mask_preds_pos)
 
         # ------------------------------------------------------------------
-        # Boundary aux loss – computed at decoder feature resolution,
-        # capped at boundary_max_res.  GT mask is downsampled to match.
-        # No upsampling of pred needed → much lower memory footprint.
-        # Only runs when compute_boundary=True (last decoder layer only).
+        # Auxiliary losses – each computed at its own capped resolution.
+        # Only runs for the last decoder layer (aux_loss_names non-empty).
         # ------------------------------------------------------------------
-        if compute_boundary and self.loss_boundary is not None:
-            h_feat, w_feat = mask_preds_pos.shape[-2:]
-            bdr_h = min(h_feat, self.boundary_max_res)
-            bdr_w = min(w_feat, self.boundary_max_res)
-
-            # pred: shrink only if feature resolution exceeds boundary_max_res
-            if bdr_h < h_feat or bdr_w < w_feat:
-                mask_preds_bdr = F.interpolate(
-                    mask_preds_pos.unsqueeze(1), size=(bdr_h, bdr_w),
-                    mode='bilinear', align_corners=False).squeeze(1)
-            else:
-                mask_preds_bdr = mask_preds_pos  # already at or below cap
-
-            # GT: downsample from full image res to boundary res
-            with torch.no_grad():
-                mask_targets_bdr = F.interpolate(
-                    mask_targets.unsqueeze(1).float(), size=(bdr_h, bdr_w),
-                    mode='nearest').squeeze(1)
-
-            loss_boundary = self.loss_boundary(
-                mask_preds_bdr, mask_targets_bdr,
-                weight=per_gt_w, avg_factor=num_total_masks)
-        else:
-            loss_boundary = None
-
-        # ------------------------------------------------------------------
-        # Non-overlap loss – positive queries are grouped by image.  It is
-        # computed only on the last decoder layer and at capped resolution.
-        # ------------------------------------------------------------------
-        if compute_nonoverlap and self.loss_nonoverlap is not None:
-            group_sizes = [t.shape[0] for t in mask_targets_list]
-            ov_h = min(mask_preds_pos.shape[-2], self.nonoverlap_max_res)
-            ov_w = min(mask_preds_pos.shape[-1], self.nonoverlap_max_res)
-            if ov_h < mask_preds_pos.shape[-2] or ov_w < mask_preds_pos.shape[-1]:
-                mask_preds_overlap = F.interpolate(
-                    mask_preds_pos.unsqueeze(1), size=(ov_h, ov_w),
-                    mode='bilinear', align_corners=False).squeeze(1)
-            else:
-                mask_preds_overlap = mask_preds_pos
-
-            group_weights = self._build_nonoverlap_group_weights(
-                mask_targets_list, batch_img_metas, mask_preds_pos)
-            loss_nonoverlap = self.loss_nonoverlap(
-                mask_preds_overlap, group_sizes, group_weights=group_weights,
-                avg_factor=num_total_masks)
-        else:
-            loss_nonoverlap = None
+        aux_losses = self._compute_aux_losses(
+            aux_loss_names, mask_preds_pos, mask_targets, mask_targets_list,
+            batch_img_metas, per_gt_w, num_total_masks)
 
         # ------------------------------------------------------------------
         # Standard point-sampled dice + CE mask losses (quality-weighted dice)
@@ -229,13 +306,7 @@ class Mask2FormerHeadV2(Mask2FormerHead):
             mask_point_preds_flat, mask_point_targets_flat,
             avg_factor=num_total_masks * self.num_points)
 
-        if loss_boundary is not None and loss_nonoverlap is not None:
-            return loss_cls, loss_mask, loss_dice, loss_boundary, loss_nonoverlap
-        if loss_boundary is not None:
-            return loss_cls, loss_mask, loss_dice, loss_boundary
-        if loss_nonoverlap is not None:
-            return loss_cls, loss_mask, loss_dice, loss_nonoverlap
-        return loss_cls, loss_mask, loss_dice
+        return loss_cls, loss_mask, loss_dice, aux_losses
 
     # ------------------------------------------------------------------
     # Override loss_by_feat
@@ -246,52 +317,35 @@ class Mask2FormerHeadV2(Mask2FormerHead):
         """Compute losses across decoder layers.
 
         For all-but-last layers: standard cls/mask/dice losses only.
-        For the last layer: additionally compute boundary aux loss
-        (once, at capped resolution).
+        For the last layer: additionally compute every configured
+        auxiliary loss (once, each at its own capped resolution).
         """
         num_dec_layers = len(all_cls_scores)
 
-        # Aux decoder layers (all but last) — no boundary loss
+        # Aux decoder layers (all but last) — no auxiliary losses.
         if num_dec_layers > 1:
-            aux_results = multi_apply(
+            aux_cls, aux_mask, aux_dice, _ = multi_apply(
                 self._loss_by_feat_single,
                 list(all_cls_scores[:-1]),
                 list(all_mask_preds[:-1]),
                 [batch_gt_instances] * (num_dec_layers - 1),
                 [batch_img_metas] * (num_dec_layers - 1))
-            aux_cls, aux_mask, aux_dice = aux_results
         else:
             aux_cls, aux_mask, aux_dice = [], [], []
 
-        # Last decoder layer — with boundary loss
-        last_result = self._loss_by_feat_single(
+        # Last decoder layer — with every configured auxiliary loss.
+        active_names = self.active_aux_loss_names
+        last_cls, last_mask, last_dice, last_aux = self._loss_by_feat_single(
             all_cls_scores[-1], all_mask_preds[-1],
             batch_gt_instances, batch_img_metas,
-            compute_boundary=(self.loss_boundary is not None),
-            compute_nonoverlap=(self.loss_nonoverlap is not None))
-
-        if self.loss_boundary is not None and self.loss_nonoverlap is not None:
-            (last_cls, last_mask, last_dice, last_boundary,
-             last_nonoverlap) = last_result
-        elif self.loss_boundary is not None:
-            last_cls, last_mask, last_dice, last_boundary = last_result
-            last_nonoverlap = None
-        elif self.loss_nonoverlap is not None:
-            last_cls, last_mask, last_dice, last_nonoverlap = last_result
-            last_boundary = None
-        else:
-            last_cls, last_mask, last_dice = last_result
-            last_boundary = None
-            last_nonoverlap = None
+            aux_loss_names=active_names)
 
         loss_dict = dict()
         loss_dict['loss_cls'] = last_cls
         loss_dict['loss_mask'] = last_mask
         loss_dict['loss_dice'] = last_dice
-        if last_boundary is not None:
-            loss_dict['loss_boundary'] = last_boundary
-        if last_nonoverlap is not None:
-            loss_dict['loss_nonoverlap'] = last_nonoverlap
+        for name in active_names:
+            loss_dict[f'loss_{name}'] = last_aux[name]
 
         for dec_i, (lc, lm, ld) in enumerate(
                 zip(aux_cls, aux_mask, aux_dice)):

@@ -1,19 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=m2f_bound_v3_ov
-#SBATCH --partition=GEOG-HPC-GPU
-#SBATCH --qos=Normal
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
-#SBATCH --gres=shard:1
-#SBATCH --time=2-00:00:00
-#SBATCH --output=logs/train_v3_ov_%j.out
-#SBATCH --error=logs/train_v3_ov_%j.err
+# 单机 H800 直接训练 Mask2Former + 非重叠先验 Loss V3（原 shard 配置，
+# 单卡满显存跑，不再需要 shard 版本的梯度累积设置）。
+set -euo pipefail
+cd "$(dirname "$0")/.."
 
 source ~/miniconda3/etc/profile.d/conda.sh
-conda activate mmdet-py38
+conda activate openmmlab
 
-cd $HOME/code/mmdetection-apbd
-
-python tools/train.py configs/ai4boundary/mask2former_r50_1xb2-50e_custom_boundary_v3_nonoverlap_shard.py
+python tools/train.py configs/ai4boundary/mask2former_r50_1xb2-50e_custom_boundary_v3_nonoverlap.py "$@"

@@ -52,3 +52,15 @@ param_scheduler = dict(
     by_epoch=False,
     milestones=[int(max_iters * 0.9), int(max_iters * 0.95)],
     gamma=0.1)
+
+# Keep checkpoint interval aligned with val_interval_iters above (V2's
+# default_hooks.checkpoint.interval is a resolved constant, not a live
+# reference, so it doesn't auto-follow this file's own val_interval_iters).
+default_hooks = dict(
+    checkpoint=dict(
+        type='CheckpointHook',
+        by_epoch=False,
+        interval=val_interval_iters,
+        max_keep_ckpts=3,
+        save_best='coco/segm_mAP',
+        rule='greater'))
