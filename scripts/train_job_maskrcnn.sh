@@ -1,9 +1,8 @@
 #!/bin/bash
-# 单机 H800 直接训练 Mask R-CNN baseline。
+# Mask R-CNN baseline aligned with V5 data/eval controls.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate openmmlab
-
-python tools/train.py configs/ai4boundary/mask-rcnn_r50_fpn_1x_ai4b.py "$@"
+mkdir -p logs
+exec /root/miniconda3/envs/openmmlab/bin/python tools/train.py \
+  configs/ai4boundary/mask-rcnn_r50_fpn_50e_ai4b_v5data.py \
+  "$@"

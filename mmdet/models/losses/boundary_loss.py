@@ -200,10 +200,16 @@ class KervadecBoundaryLoss(nn.Module):
         self.max_distance = max_distance
         self.eps = eps
 
-    def _signed_distance_map(self, target: torch.Tensor) -> torch.Tensor:
+    def signed_distance_map(self, target: torch.Tensor) -> torch.Tensor:
         """target: (N, H, W) binary tensor -> (N, H, W) signed distance map
         (positive outside, negative inside, in pixel units), computed on
-        CPU with scipy and returned on ``target.device``."""
+        CPU with scipy and returned on ``target.device``.
+
+        Public because the point-sampled path in
+        :class:`~mmdet.models.dense_heads.Mask2FormerHeadV2` needs the dense
+        map to sample from: it builds the map here, then reads it at the same
+        coordinates Mask2Former already drew for the dice/CE losses.
+        """
         target_np = target.detach().cpu().numpy().astype(np.uint8)
         maps = np.empty(target_np.shape, dtype=np.float32)
         for i, m in enumerate(target_np):
@@ -224,22 +230,38 @@ class KervadecBoundaryLoss(nn.Module):
         return torch.from_numpy(maps).to(
             device=target.device, dtype=torch.float32)
 
+    def loss_from_signed_distance(self, pred, dist_map, weight=None,
+                                  avg_factor=None):
+        """Core term ``mean_x[ sigmoid(z(x)) * phi(x) ]``, shared by the dense
+        and the point-sampled paths so the two cannot drift apart.
+
+        Args:
+            pred (Tensor): Logits, shape (N, ...) — (N, H, W) for the dense
+                path, (N, num_points) for the point-sampled one.
+            dist_map (Tensor): Signed distance values with the same shape as
+                ``pred``, already sampled at matching locations.
+            weight (Tensor, optional): (N,) per-sample loss weights.
+            avg_factor (float, optional): Normalization factor.
+        """
+        probs = pred.sigmoid()
+        reduce_dims = tuple(range(1, pred.dim()))
+        loss_per_sample = (probs * dist_map).mean(dim=reduce_dims)
+        return self.loss_weight * weight_reduce_loss(
+            loss_per_sample, weight, 'mean', avg_factor)
+
     def forward(self, pred, target, weight=None, avg_factor=None,
                reduction_override=None):
-        """
+        """Dense path: build the distance map from the GT mask, then reduce.
+
         pred: (N, H, W) logits.
         target: (N, H, W) binary GT mask.
         weight: (N,) per-sample loss weights (optional).
         avg_factor: normalization factor (optional).
         """
         with torch.no_grad():
-            dist_map = self._signed_distance_map(target)
-
-        probs = pred.sigmoid()
-        loss_per_sample = (probs * dist_map).mean(dim=(1, 2))
-        loss = self.loss_weight * weight_reduce_loss(
-            loss_per_sample, weight, 'mean', avg_factor)
-        return loss
+            dist_map = self.signed_distance_map(target)
+        return self.loss_from_signed_distance(pred, dist_map, weight,
+                                              avg_factor)
 
 
 @MODELS.register_module()

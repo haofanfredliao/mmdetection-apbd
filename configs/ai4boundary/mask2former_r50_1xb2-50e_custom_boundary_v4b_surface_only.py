@@ -1,10 +1,16 @@
 # ============================================================
-# 消融实验 — 仅 Track2 的 Kervadec surface loss（单变量，不叠加 Track1/Track3）
+# 消融实验 — 仅 Track2 的 Kervadec surface loss（单变量）
 #
 # 基于 v3_clean_bg（含继承的 BoundaryDiceLoss + 干净数据配方），只加
-# loss_surface，推理端保持默认（不做 argmax/mask-nms）。用于和
-# v4_combined 及其它 leave-one-out 变体对比，独立衡量 surface loss 的
-# 贡献，而不与 argmax/曲率正则的效果混在一起。
+# loss_surface，推理端保持 v3 默认（不做 argmax/mask-nms）。
+#
+# Track3 已废弃（原因见 v4_combined 配置头部），而 Track1 是纯推理期改动，
+# 训练图与本配置完全相同 —— 所以这一个训练任务同时覆盖了 v4_combined：
+# 训完之后拿同一份权重换 test_cfg 评估即可得到 "+Track1" 那一格，
+# 不需要单独再训一次。save_best 用未经 argmax 削弱的 mAP 口径挑权重。
+#
+# surface loss 的权重与 ramp 已按首轮 v4 的诊断结论修正，
+# 见 v4_combined 配置里的说明。
 # ============================================================
 
 _base_ = ['./mask2former_r50_1xb2-50e_custom_boundary_v3_clean_bg.py']
@@ -23,9 +29,9 @@ custom_hooks = [
         type='LossWeightRampHook',
         module_path='panoptic_head.loss_surface',
         start_weight=0.001,
-        end_weight=0.05,
+        end_weight=0.5,
         begin_iter=0,
-        end_iter=int(max_iters * 0.3)),
+        end_iter=int(max_iters * 0.1)),
 ]
 
 val_interval_iters = 660

@@ -25,18 +25,43 @@ from pathlib import Path
 # ===================================================================
 PROJECT_DIR = Path(__file__).parent.resolve()
 
+# 2x2 归因矩阵：v3/v5 两套权重 x 标准/argmax 两套推理后处理。
+# 训练期 v3 走标准融合头、v5 走 argmax，所以两者的训练日志数字没法直接相减 ——
+# 交叉跑这四格才能把「训练侧改动」和「推理侧后处理」各自的贡献拆开。
+# 测试时配置只决定 panoptic_fusion_head 与 test_cfg，损失项不参与，
+# 且两个配置的可学习参数完全一致，因此权重可以交叉加载。
+V3_CKPT = ('work_dirs/mask2former_r50_1xb2-50e_custom_boundary_v3_clean_bg/'
+           'best_coco_segm_mAP_iter_16500.pth')
+V5_CKPT = ('work_dirs/mask2former_r50_1xb2-50e_custom_boundary_v5/'
+           'best_coco_segm_mAP_iter_16500.pth')
+CFG_STD = ('configs/ai4boundary/'
+           'mask2former_r50_1xb2-50e_custom_boundary_v3_clean_bg.py')
+CFG_ARGMAX = 'configs/ai4boundary/mask2former_r50_1xb2-50e_custom_boundary_v5.py'
+
 MODELS = [
     {
-        'name': 'mask2former_boundary_v1',
-        'label': 'Mask2Former (Boundary Dice Loss v1)',
-        'config': 'configs/ai4boundary/mask2former_r50_1xb2-50e_custom_boundary_v1.py',
-        'checkpoint': 'work_dirs/mask2former_r50_1xb2-50e_custom_boundary_v1/best_coco_segm_mAP_iter_21312.pth',
+        'name': 'v3w_std',
+        'label': 'v3 wts / std PP',
+        'config': CFG_STD,
+        'checkpoint': V3_CKPT,
     },
     {
-        'name': 'mask2former_boundary_v2',
-        'label': 'Mask2Former (Boundary Aux Loss v2)',
-        'config': 'configs/ai4boundary/mask2former_r50_1xb2-50e_custom_boundary_v2.py',
-        'checkpoint': 'work_dirs/mask2former_r50_1xb2-50e_custom_boundary_v2/best_coco_segm_mAP_iter_19600.pth',
+        'name': 'v3w_argmax',
+        'label': 'v3 wts / argmax PP',
+        'config': CFG_ARGMAX,
+        'checkpoint': V3_CKPT,
+    },
+    {
+        'name': 'v5w_std',
+        'label': 'v5 wts / std PP',
+        'config': CFG_STD,
+        'checkpoint': V5_CKPT,
+    },
+    {
+        'name': 'v5w_argmax',
+        'label': 'v5 wts / argmax PP',
+        'config': CFG_ARGMAX,
+        'checkpoint': V5_CKPT,
     },
 ]
 
@@ -86,20 +111,27 @@ CLOSER_TO_ONE_METRICS = {
 # 推理 & 评估
 # ===================================================================
 
-def _make_field_metric_config(base_config: str, data_root: str, tmp_dir: Path) -> str:
-    """
-    为缺少 FieldSegmentationMetric 的模型生成一个临时的 override 配置文件。
+def _make_split_override(base_config: str, split: str, tmp_dir: Path) -> str:
+    """生成临时配置，把 test_dataloader / test_evaluator 指向指定划分。
+
+    tools/test.py 固定读 test_dataloader，而训练期日志里的数字都出自 val
+    (187 张)，test 是另一批 1139 张。要和训练日志对齐就得把测试入口临时改指
+    到 val；跑 test 时不需要这个 override，两个配置本来就指向 test。
     返回临时配置文件路径。
     """
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    tmp_cfg = tmp_dir / 'field_metric_override.py'
-    ann_file = f'{data_root}annotations/instances_val.json'
+    tmp_cfg = tmp_dir / f'split_{split}.py'
+    data_root = 'data/data/ai4b_coco/'
     tmp_cfg.write_text(
         f"_base_ = ['{base_config}']\n"
-        f"val_evaluator = [\n"
+        f"test_dataloader = dict(\n"
+        f"    dataset=dict(\n"
+        f"        ann_file='annotations/instances_{split}.json',\n"
+        f"        data_prefix=dict(img='images/{split}/')))\n"
+        f"test_evaluator = [\n"
         f"    dict(\n"
         f"        type='CocoMetric',\n"
-        f"        ann_file='{ann_file}',\n"
+        f"        ann_file='{data_root}annotations/instances_{split}.json',\n"
         f"        metric=['bbox', 'segm'],\n"
         f"        format_only=False),\n"
         f"    dict(type='FieldSegmentationMetric', iou_thr=0.5),\n"
@@ -108,7 +140,8 @@ def _make_field_metric_config(base_config: str, data_root: str, tmp_dir: Path) -
     return str(tmp_cfg)
 
 
-def run_test(model_cfg: dict, device: str) -> dict:
+def run_test(model_cfg: dict, device: str, split: str = 'test',
+             save_vis: bool = True) -> dict:
     """调用 tools/test.py 评估单个模型，返回解析的指标字典。"""
     work_dir = EVAL_BASE_DIR / model_cfg['name']
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -119,16 +152,14 @@ def run_test(model_cfg: dict, device: str) -> dict:
     # 可视化图片保存目录（--show-dir 是相对 work_dir 的子路径名）
     vis_subdir = str(VIS_BASE_DIR / model_cfg['name'])
 
-    # 若模型配置缺少 FieldSegmentationMetric，生成临时 override 配置
     config_path = model_cfg['config']
-    if model_cfg.get('inject_field_metric'):
-        data_root = 'data/data/ai4b_coco/'
-        config_path = _make_field_metric_config(
+    if split != 'test':
+        config_path = _make_split_override(
             base_config=str(PROJECT_DIR / model_cfg['config']),
-            data_root=data_root,
+            split=split,
             tmp_dir=work_dir / '_tmp_cfg',
         )
-        print(f'[INFO] 已生成临时配置（注入 FieldSegmentationMetric）: {config_path}')
+        print(f'[INFO] 已生成临时配置（评测划分 -> {split}）: {config_path}')
 
     cmd = [
         sys.executable, 'tools/test.py',
@@ -136,8 +167,9 @@ def run_test(model_cfg: dict, device: str) -> dict:
         model_cfg['checkpoint'],
         '--work-dir', str(work_dir),
         '--out', str(out_file),
-        '--show-dir', vis_subdir,
     ]
+    if save_vis:
+        cmd += ['--show-dir', vis_subdir]
 
     env = os.environ.copy()
     # CPU 模式：屏蔽所有 GPU，让 mmengine 自动回退到 CPU
@@ -152,10 +184,12 @@ def run_test(model_cfg: dict, device: str) -> dict:
     print(f"  模型  : {model_cfg['label']}")
     print(f"  配置  : {model_cfg['config']}")
     print(f"  权重  : {model_cfg['checkpoint']}")
+    print(f"  划分  : {split}")
     print(f"  设备  : {device}")
     print(f"  结果目录 : {work_dir}")
     print(f"  预测文件 : {out_file}")
-    print(f"  可视化图片: {work_dir}/<时间戳>/{vis_subdir}/")
+    if save_vis:
+        print(f"  可视化图片: {work_dir}/<时间戳>/{vis_subdir}/")
     print(f"{'='*72}\n")
 
     # 实时流输出，同时捕获所有行用于解析指标
@@ -248,7 +282,7 @@ def parse_scalars_json(work_dir: Path) -> dict:
 # 结果展示
 # ===================================================================
 
-def print_comparison(all_results: dict):
+def print_comparison(all_results: dict, split: str = 'test'):
     """打印对比表并将报告保存至文件。"""
     model_names = list(all_results.keys())
     labels = [m['label'] for m in MODELS if m['name'] in model_names]
@@ -277,7 +311,8 @@ def print_comparison(all_results: dict):
     lines = [
         '',
         sep,
-        f'  EVALUATION COMPARISON  —  val split  —  {datetime.now().strftime("%Y-%m-%d %H:%M")}',
+        f'  EVALUATION COMPARISON  —  {split} split  —  '
+        f'{datetime.now().strftime("%Y-%m-%d %H:%M")}',
         sep,
         f"{'Metric':<{key_w}}" + ''.join(f'{lb:>{col_w}}' for lb in labels),
         '-' * (key_w + col_w * len(labels)),
@@ -333,6 +368,14 @@ def parse_args():
     parser.add_argument(
         '--model', choices=[m['name'] for m in MODELS] + ['all'], default='all',
         help='只评估指定模型，默认评估全部')
+    parser.add_argument(
+        '--split', choices=['val', 'test'], default='test',
+        help='评测划分。val (187 张) 可与训练日志直接对齐且快得多；'
+             'test (1139 张) 是论文最终数字（默认: test）')
+    parser.add_argument(
+        '--no-vis', action='store_true',
+        help='跳过逐图可视化。FieldSegmentationMetric 已经很慢，'
+             '只要指标时建议加上')
     return parser.parse_args()
 
 
@@ -351,7 +394,8 @@ def main():
 
     all_results: dict = {}
     for model_cfg in models_to_run:
-        metrics = run_test(model_cfg, device=args.device)
+        metrics = run_test(model_cfg, device=args.device, split=args.split,
+                           save_vis=not args.no_vis)
         all_results[model_cfg['name']] = metrics
 
         if metrics:
@@ -369,7 +413,7 @@ def main():
 
     # 打印对比表
     if len(all_results) >= 2:
-        print_comparison(all_results)
+        print_comparison(all_results, split=args.split)
     elif len(all_results) == 1:
         name = list(all_results.keys())[0]
         print(f'\n[INFO] 仅评估了一个模型 ({name})，跳过对比表。')

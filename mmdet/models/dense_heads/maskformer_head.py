@@ -247,7 +247,7 @@ class MaskFormerHead(AnchorFreeHead):
         res = (labels_list, label_weights_list, mask_targets_list,
                mask_weights_list, avg_factor)
         if return_sampling_results:
-            res = res + (sampling_results_list)
+            res = res + (sampling_results_list, )
 
         return res + tuple(rest_results)
 

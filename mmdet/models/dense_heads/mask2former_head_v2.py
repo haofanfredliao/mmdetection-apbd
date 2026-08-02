@@ -61,6 +61,15 @@ class Mask2FormerHeadV2(Mask2FormerHead):
         loss_surface (dict, optional): Config for the Kervadec surface
             loss. Recommended starting weight is small (e.g. 0.01-0.1);
             see :class:`~mmdet.models.losses.KervadecBoundaryLoss`.
+        surface_mode (str): Where the surface loss is evaluated.
+            ``'dense'`` averages it over the whole downsampled frame at the
+            last decoder layer only. ``'point'`` instead reads the distance
+            map at the coordinates Mask2Former already importance-samples
+            for dice/CE, and runs on every decoder layer. Prefer
+            ``'point'``: under ``'dense'`` most of the frame sits deep
+            inside or outside the mask where the sigmoid is saturated, so
+            those pixels dominate the reported value while contributing
+            almost no gradient.
         loss_curvature (dict, optional): Config for the curvature
             regularization loss.
         Any of the above left as ``None`` (the default) omits that loss
@@ -79,10 +88,15 @@ class Mask2FormerHeadV2(Mask2FormerHead):
                  nonoverlap_max_res: int = 128,
                  loss_surface=None,
                  surface_max_res: int = 128,
+                 surface_mode: str = 'dense',
                  loss_curvature=None,
                  curvature_max_res: int = 128,
                  **kwargs):
         super().__init__(**kwargs)
+        assert surface_mode in ('dense', 'point'), \
+            f"surface_mode must be 'dense' or 'point', got {surface_mode}"
+        self.surface_mode = surface_mode
+        self._gt_dist_cache = None
         self.loss_boundary = (
             MODELS.build(loss_boundary) if loss_boundary is not None else None)
         self.boundary_max_res = boundary_max_res
@@ -194,7 +208,9 @@ class Mask2FormerHeadV2(Mask2FormerHead):
                 mask_preds_ov, group_sizes, group_weights=group_weights,
                 avg_factor=num_total_masks)
 
-        if 'surface' in aux_loss_names:
+        # 'point' mode is handled in _loss_by_feat_single instead, since it
+        # needs the sampled coordinates and runs on every decoder layer.
+        if 'surface' in aux_loss_names and self.surface_mode == 'dense':
             pred_sfc, target_sfc = self._resize_pred_target(
                 mask_preds_pos, mask_targets, self.surface_max_res)
             aux_losses['surface'] = self.loss_surface(
@@ -209,6 +225,58 @@ class Mask2FormerHeadV2(Mask2FormerHead):
                 avg_factor=num_total_masks)
 
         return aux_losses
+
+    @property
+    def _surface_on_points(self) -> bool:
+        return self.loss_surface is not None and self.surface_mode == 'point'
+
+    def _build_gt_distance_cache(self, batch_gt_instances) -> List[Tensor]:
+        """Signed distance map of every GT mask in the batch, one entry per
+        image, computed once per iteration.
+
+        The distance transform runs on CPU via scipy and is by far the most
+        expensive part of the surface loss; computing it inside
+        ``_loss_by_feat_single`` would repeat it for all ten decoder layers
+        and cost ~70% extra wall clock. The Hungarian assignment reorders the
+        GT differently at each layer, but only ever *permutes* it — each GT is
+        matched exactly once — so a layer's targets can be obtained by
+        indexing this cache with that layer's ``pos_assigned_gt_inds``.
+        Downsampling commutes with the permutation (it is per-mask), so the
+        cache is built at the capped resolution directly.
+        """
+        cache = []
+        for gt in batch_gt_instances:
+            masks = gt.masks
+            h, w = masks.shape[-2:]
+            out_hw = (min(h, self.surface_max_res),
+                      min(w, self.surface_max_res))
+            if masks.shape[0] == 0:
+                # Still needs the right spatial shape: images with no GT are
+                # concatenated with the rest of the batch.
+                cache.append(
+                    masks.new_zeros((0, ) + out_hw, dtype=torch.float32))
+                continue
+            target_sfc = self._resize_target(masks, out_hw)
+            cache.append(self.loss_surface.signed_distance_map(target_sfc))
+        return cache
+
+    def _surface_loss_on_points(self, sampling_results, points_coords: Tensor,
+                                mask_point_preds: Tensor,
+                                per_gt_w, num_total_masks) -> Tensor:
+        """Kervadec surface loss read at Mask2Former's sampled coordinates."""
+        from mmcv.ops import point_sample
+
+        with torch.no_grad():
+            dist_map = torch.cat([
+                self._gt_dist_cache[i][res.pos_assigned_gt_inds]
+                for i, res in enumerate(sampling_results)
+            ], dim=0)
+            phi_points = point_sample(
+                dist_map.unsqueeze(1), points_coords).squeeze(1)
+
+        return self.loss_surface.loss_from_signed_distance(
+            mask_point_preds, phi_points, weight=per_gt_w,
+            avg_factor=num_total_masks)
 
     # ------------------------------------------------------------------
     # Override _loss_by_feat_single
@@ -238,10 +306,21 @@ class Mask2FormerHeadV2(Mask2FormerHead):
         cls_scores_list = [cls_scores[i] for i in range(num_imgs)]
         mask_preds_list = [mask_preds[i] for i in range(num_imgs)]
 
-        (labels_list, label_weights_list, mask_targets_list,
-         mask_weights_list, avg_factor) = self.get_targets(
-             cls_scores_list, mask_preds_list,
-             batch_gt_instances, batch_img_metas)
+        # The point-sampled surface loss needs the Hungarian assignment to
+        # index the per-iteration distance-map cache.
+        if self._surface_on_points:
+            (labels_list, label_weights_list, mask_targets_list,
+             mask_weights_list, avg_factor,
+             sampling_results) = self.get_targets(
+                 cls_scores_list, mask_preds_list,
+                 batch_gt_instances, batch_img_metas,
+                 return_sampling_results=True)
+        else:
+            sampling_results = None
+            (labels_list, label_weights_list, mask_targets_list,
+             mask_weights_list, avg_factor) = self.get_targets(
+                 cls_scores_list, mask_preds_list,
+                 batch_gt_instances, batch_img_metas)
 
         labels = torch.stack(labels_list, dim=0)
         label_weights = torch.stack(label_weights_list, dim=0)
@@ -267,6 +346,8 @@ class Mask2FormerHeadV2(Mask2FormerHead):
         if mask_targets.shape[0] == 0:
             zero = mask_preds_pos.sum()
             aux_losses = {name: zero for name in aux_loss_names}
+            if self._surface_on_points:
+                aux_losses['surface'] = zero
             return loss_cls, zero, zero, aux_losses
 
         # --- per-gt quality weights ---
@@ -306,6 +387,13 @@ class Mask2FormerHeadV2(Mask2FormerHead):
             mask_point_preds_flat, mask_point_targets_flat,
             avg_factor=num_total_masks * self.num_points)
 
+        # Point-sampled surface loss rides on the coordinates drawn above and
+        # is therefore computed for every decoder layer, not just the last.
+        if self._surface_on_points:
+            aux_losses['surface'] = self._surface_loss_on_points(
+                sampling_results, points_coords, mask_point_preds,
+                per_gt_w, num_total_masks)
+
         return loss_cls, loss_mask, loss_dice, aux_losses
 
     # ------------------------------------------------------------------
@@ -316,22 +404,28 @@ class Mask2FormerHeadV2(Mask2FormerHead):
                      batch_gt_instances, batch_img_metas):
         """Compute losses across decoder layers.
 
-        For all-but-last layers: standard cls/mask/dice losses only.
+        For all-but-last layers: standard cls/mask/dice losses only, plus
+        the surface loss when it runs in ``'point'`` mode.
         For the last layer: additionally compute every configured
         auxiliary loss (once, each at its own capped resolution).
         """
         num_dec_layers = len(all_cls_scores)
 
-        # Aux decoder layers (all but last) — no auxiliary losses.
+        # Built once here rather than per layer; see _build_gt_distance_cache.
+        if self._surface_on_points:
+            self._gt_dist_cache = self._build_gt_distance_cache(
+                batch_gt_instances)
+
+        # Aux decoder layers (all but last) — no dense auxiliary losses.
         if num_dec_layers > 1:
-            aux_cls, aux_mask, aux_dice, _ = multi_apply(
+            aux_cls, aux_mask, aux_dice, aux_extra = multi_apply(
                 self._loss_by_feat_single,
                 list(all_cls_scores[:-1]),
                 list(all_mask_preds[:-1]),
                 [batch_gt_instances] * (num_dec_layers - 1),
                 [batch_img_metas] * (num_dec_layers - 1))
         else:
-            aux_cls, aux_mask, aux_dice = [], [], []
+            aux_cls, aux_mask, aux_dice, aux_extra = [], [], [], []
 
         # Last decoder layer — with every configured auxiliary loss.
         active_names = self.active_aux_loss_names
@@ -347,10 +441,13 @@ class Mask2FormerHeadV2(Mask2FormerHead):
         for name in active_names:
             loss_dict[f'loss_{name}'] = last_aux[name]
 
-        for dec_i, (lc, lm, ld) in enumerate(
-                zip(aux_cls, aux_mask, aux_dice)):
+        for dec_i, (lc, lm, ld, extra) in enumerate(
+                zip(aux_cls, aux_mask, aux_dice, aux_extra)):
             loss_dict[f'd{dec_i}.loss_cls'] = lc
             loss_dict[f'd{dec_i}.loss_mask'] = lm
             loss_dict[f'd{dec_i}.loss_dice'] = ld
+            if 'surface' in extra:
+                loss_dict[f'd{dec_i}.loss_surface'] = extra['surface']
 
+        self._gt_dist_cache = None
         return loss_dict

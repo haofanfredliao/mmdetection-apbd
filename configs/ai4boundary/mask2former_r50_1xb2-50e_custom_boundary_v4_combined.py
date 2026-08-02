@@ -20,14 +20,21 @@
 #       for direct boundary localization, complementing the region-based
 #       Dice/CE + boundary-band losses above.
 #
-#   Track 3 (E5, train-time, "increment"):
-#     - loss_curvature: NEW CurvatureLoss, penalizes jagged predicted
-#       boundaries via a hinge on estimated curvature magnitude, with a
-#       dead-zone (tau) that protects genuine sharp corners (e.g. the
-#       near-90° corners typical of field boundaries) from being
-#       smoothed away. Deliberately kept low-weight per plans.md's note
-#       that this is meant to be a small increment on top of Track 1/2,
-#       not a primary driver.
+#   Track 3 (E5, curvature regularization): DROPPED after the first v4 run.
+#     CurvatureLoss's kappa estimator (Sobel divergence of the unit normal
+#     field) does not measure geometric curvature at this discretization: a
+#     perfectly straight field edge measures |kappa| ~3.1, not ~0, so tau=0.3
+#     left 98.4% of band pixels penalized and the corner-protecting dead zone
+#     never engaged. Worse, its minimum is not at the GT — measured on real
+#     GT at 128px, a perfect prediction scores 11.78 while an over-smoothed
+#     blob scores 5.05, i.e. the loss rewards being smoother than ground
+#     truth. That matches what the run produced: the term sat flat at ~0.39
+#     for all 16500 iters, and against v3_clean_bg the masks came out
+#     smoother (vertices@IoU95 32.9->27.3) but less faithful (Boundary-IoU
+#     0.540->0.525, Boundary-F_1px 0.446->0.424, segm_mAP 0.347->0.322 at
+#     matched post-processing). Reviving Track 3 needs tau ~5-8 and
+#     preferably a contour-turning-angle estimator matching the one in
+#     FieldSegmentationMetric._curvature_energy.
 #
 # Parameter adjustments (this file's whole reason for existing beyond
 # stacking losses):
@@ -58,14 +65,7 @@ model = dict(
             type='KervadecBoundaryLoss',
             loss_weight=0.001,
             max_distance=32),
-        surface_max_res=128,
-        # Track 3 "increment": curvature regularization, low weight.
-        loss_curvature=dict(
-            type='CurvatureLoss',
-            loss_weight=0.05,
-            tau=0.3,
-            band_kernel_size=5),
-        curvature_max_res=128),
+        surface_max_res=128),
     # Track 1: switch to the argmax/mask-nms capable fusion head.
     panoptic_fusion_head=dict(type='FieldMaskFormerFusionHead'),
     test_cfg=dict(
@@ -76,20 +76,44 @@ model = dict(
         score_thr=0.2,
         argmax_instance=True,
         iou_thr=0.7,
-        filter_low_score=False))
+        # MUST stay True whenever argmax_instance=True. The argmax in
+        # FieldMaskFormerFusionHead._argmax_instance_postprocess runs over the
+        # query axis only — there is no background row to lose to — so every
+        # pixel is claimed by some query and the masks tile the whole image.
+        # This line (mask &= mask_prob >= 0.5) is the only thing that carves
+        # background back out. The e1b_argmax_balanced preset this config was
+        # copied from had it False; measured on the test set with identical
+        # weights, flipping it to True improves every metric at once:
+        # segm_mAP 0.246->0.298, Boundary-IoU 0.458->0.520,
+        # Boundary-F_1px 0.335->0.411, vertices@IoU95 26.6->12.3,
+        # curvature energy 0.600->0.373.
+        filter_low_score=True))
 
 # Same total optimization budget as V3 clean_bg for a fair comparison
 # (docs/plans.md "实验规范": align max_iters/LR schedule across configs).
 max_iters = 16500
 
+# The first v4 run measured loss_surface's raw value (weighted value / its
+# current weight) at -0.294 from iter ~5000 onward, which is exactly the value
+# a *perfect* prediction scores (measured on real GT at the 128px training
+# resolution: perfect = -0.2947, all-0.5 prediction = +13.29). So the loss hit
+# its optimum a third of the way in and contributed no gradient afterwards,
+# while its weighted magnitude (-0.0147 against a total of ~23.5) was 0.06% of
+# the objective. Two changes follow from that:
+#   - end_weight 0.05 -> 0.5. Bounded by construction, so this cannot blow up:
+#     the worst case (an all-0.5 prediction) contributes 13.29 * 0.5 = 6.6
+#     against a total of ~66 at iter 50.
+#   - ramp end 30% -> 10% of training. The old schedule reached full weight at
+#     iter 4950, i.e. right as the loss saturated at ~iter 5000 — it was at
+#     full strength only during the window where it had nothing left to say.
 custom_hooks = [
     dict(
         type='LossWeightRampHook',
         module_path='panoptic_head.loss_surface',
         start_weight=0.001,
-        end_weight=0.05,
+        end_weight=0.5,
         begin_iter=0,
-        end_iter=int(max_iters * 0.3)),
+        end_iter=int(max_iters * 0.1)),
 ]
 
 # ---------------- eval / checkpoint frequency ----------------

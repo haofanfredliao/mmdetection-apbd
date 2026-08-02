@@ -1,20 +1,23 @@
 #!/bin/bash
 # ============================================================
-# 单卡 H800 顺序跑完 3 大问题的消融矩阵（5 个实验），从
-# run_experiment_queue.sh 的 Phase B 拆出来单独跑，因为 backbone
-# 对照实验（Phase A）先不做。
+# 消融矩阵（Track3 废弃后的坍缩版）
 #
-# 5 个实验都在 v3_clean_bg 数据配方上做加/减法：
-#   B1 仅加 Track2 surface loss（Kervadec）
-#   B2 仅加 Track3 curvature loss（正则化）
-#   B3 v4_combined 去掉 surface loss
-#   B4 v4_combined 去掉 curvature loss
-#   B5 v4_combined 去掉 Track1 后处理（argmax/mask_nms）
-# 加上已经训练完的 v3_clean_bg（全部消融基线）和 v4_combined（全部叠加），
-# 一共能拼出完整的消融对照表。
+# 原计划是 5 个完整训练（约 35 GPU-小时）。删掉 Track3 之后只剩两个因子，
+# 而其中 Track1 是纯推理期改动（只换 panoptic_fusion_head + test_cfg，
+# 训练图完全不变），所以整个 2x2 矩阵只需要 1 次训练：
 #
-# 每个实验 max_iters=16500，实测 v4_combined ~1.5s/iter，预计每个
-# 实验 ~7h，5 个合计 ≈ 35h。用 && 串行链接，前一个失败就停下。
+#                  | 无 Track1              | 有 Track1
+#   ---------------+------------------------+---------------------------
+#   无 surface     | v3_clean_bg（已训完）  | v3 权重 + 换 test_cfg
+#   有 surface     | 本脚本训练的这一次     | 同一份权重 + 换 test_cfg
+#
+# 也就是 1 次训练（~7h）+ 3 次纯推理评估，从 35 GPU-小时降到 ~7。
+#
+# 已作废、不要再跑的配置（保留文件仅作记录）：
+#   v4b_curvature_only  —— Track3 已废弃
+#   v4_minus_curvature  —— 删掉 curvature 后与 v4_combined 完全相同
+#   v4_minus_track1     —— 与 v4b_surface_only 训练图相同
+#   v4_minus_surface    —— 等价于 v3 权重 + Track1 后处理，纯推理可得
 # ============================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -22,21 +25,27 @@ cd "$(dirname "$0")/.."
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate openmmlab
 
-echo "================= Phase B: 三大问题消融矩阵（在 v3_clean_bg 数据配方上）================="
+TRAIN_CFG=configs/ai4boundary/mask2former_r50_1xb2-50e_custom_boundary_v4b_surface_only.py
+WORK_DIR=work_dirs/mask2former_r50_1xb2-50e_custom_boundary_v4b_surface_only
 
-echo ">>> [B1/5] 仅 Track2 surface loss"
-python tools/train.py configs/ai4boundary/mask2former_r50_1xb2-50e_custom_boundary_v4b_surface_only.py
+echo "================= [1/2] 训练：v3 配方 + Track2 surface loss（修正权重后）================="
+python tools/train.py "${TRAIN_CFG}"
 
-echo ">>> [B2/5] 仅 Track3 curvature loss"
-python tools/train.py configs/ai4boundary/mask2former_r50_1xb2-50e_custom_boundary_v4b_curvature_only.py
+echo "================= [2/2] 后处理评估：同一份权重叠加 Track1 ================="
+CKPT=$(ls -t "${WORK_DIR}"/best_coco_segm_mAP_iter_*.pth | head -1)
+echo ">>> 使用 checkpoint: ${CKPT}"
 
-echo ">>> [B3/5] v4_combined 去掉 surface loss"
-python tools/train.py configs/ai4boundary/mask2former_r50_1xb2-50e_custom_boundary_v4_minus_surface.py
+# 无 Track1 的那一格训练时已经评过，这里补上 +Track1 的一格。
+python tools/test.py "${TRAIN_CFG}" "${CKPT}" \
+  --work-dir outputs/eval/surface_plus_track1 \
+  --cfg-options model.panoptic_fusion_head.type=FieldMaskFormerFusionHead \
+                model.test_cfg.argmax_instance=True \
+                model.test_cfg.filter_low_score=True \
+                model.test_cfg.score_thr=0.2 \
+                model.test_cfg.iou_thr=0.7
 
-echo ">>> [B4/5] v4_combined 去掉 curvature loss"
-python tools/train.py configs/ai4boundary/mask2former_r50_1xb2-50e_custom_boundary_v4_minus_curvature.py
-
-echo ">>> [B5/5] v4_combined 去掉 Track1 后处理"
-python tools/train.py configs/ai4boundary/mask2former_r50_1xb2-50e_custom_boundary_v4_minus_track1.py
-
-echo "================= 消融实验全部完成 ================="
+echo "================= 完成，四格结果分别在 ================="
+echo "  无surface 无Track1: work_dirs/..._v3_clean_bg（训练日志）/ outputs/eval/ 下的 v3 评估"
+echo "  无surface 有Track1: outputs/eval/v3_plus_track1"
+echo "  有surface 无Track1: ${WORK_DIR}（训练日志末次 eval）"
+echo "  有surface 有Track1: outputs/eval/surface_plus_track1"
